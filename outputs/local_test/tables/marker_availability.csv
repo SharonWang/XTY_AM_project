@@ -1,0 +1,32 @@
+gene,available,module
+AGER,True,AT1 evidence
+SCEL,True,AT1 evidence
+SFTPD,True,AT2 evidence
+PLA2G4F,True,AT2 evidence
+MARCO,True,AM evidence
+APOE,True,AM evidence
+LYVE1,True,IM alternative
+CD163,True,IM alternative
+FCGR3A,True,IM alternative
+MS4A4A,True,IM alternative
+FCN1,True,Monocyte alternative
+S100A12,True,Monocyte alternative
+IL1B,True,Monocyte alternative
+CLEC4E,True,Monocyte alternative
+CD68,True,Pan-macrophage
+AIF1,True,Pan-macrophage
+MPEG1,True,Pan-macrophage
+TYROBP,True,Pan-macrophage
+FABP4,False,canonical check
+PPARG,False,canonical check
+INHBA,False,canonical check
+SIGLEC1,False,canonical check
+ITGAX,False,canonical check
+CD36,False,canonical check
+ABCG1,False,canonical check
+FOLR2,False,canonical check
+MRC1,False,canonical check
+C1QA,False,canonical check
+C1QB,False,canonical check
+C1QC,False,canonical check
+SFTPC,False,canonical check
