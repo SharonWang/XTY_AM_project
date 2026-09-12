@@ -2,13 +2,13 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Create and locally execute the first reader-facing notebook showing the published lung cell-type UMAP, AM/AT1/AT2 definitions, marker dotplots, and representative whole-core spatial maps.
+**Goal:** Create and locally execute the first reader-facing notebook showing the published lung cell-type UMAP, validating alveolar-macrophage identity against interstitial-macrophage/monocyte alternatives, validating AT1/AT2 definitions, and displaying marker and whole-core spatial evidence.
 
 **Architecture:** One self-contained Python notebook reads `xenium.h5ad` in backed mode, validates the published `celltype_final` labels, and produces bounded Cell-style figures with an explicit macaron palette. Local validation uses complete cells from a deterministic set of whole cores so spatial relationships remain valid; full HPC mode uses every eligible core with the same functions.
 
 **Tech Stack:** Python 3, Jupyter/nbformat/nbclient, anndata, h5py, pandas, NumPy, SciPy sparse matrices, Matplotlib, Seaborn, pytest.
 
-**Spec:** `XENIUM_AM_AT2_ANALYSIS_PROPOSAL.md` version 0.3
+**Spec:** `XENIUM_AM_AT2_ANALYSIS_PROPOSAL.md` version 0.4
 
 ## Global Constraints
 
@@ -18,7 +18,8 @@
 - Default HPC data path is `/dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/data/Spatial`.
 - Scientific analysis must live in Jupyter notebooks with explanatory Markdown before each step.
 - Preserve all cells from selected test cores; never subsample within a core for spatial validation.
-- Treat `celltype_final == "Macrophages"`, `"AT1"`, and `"AT2"` as published source labels, not newly inferred labels.
+- Treat `celltype_final == "Macrophages"` as a broad macrophage candidate pool, not an AM definition; `"AT1"` and `"AT2"` remain published source labels requiring marker validation.
+- Do not assign an AM inclusion flag until AM, IM, and monocyte evidence has been displayed and reviewed.
 - Do not assign MHCII-high/low states in this notebook.
 - Use explicit Cell-style macaron colors, white backgrounds, charcoal labels, rasterized points, and vector text.
 - Commit every verified change. Do not push internal paths to GitHub without explicit authorization.
@@ -32,7 +33,7 @@
 - Create: `notebooks/00_methodology_data_audit.ipynb`
 
 **Interfaces:**
-- Consumes: proposal version 0.3 and the notebook path.
+- Consumes: proposal version 0.4 and the notebook path.
 - Produces: a structurally valid notebook with a tagged `parameters` cell and the required reader-facing sections.
 
 - [ ] **Step 1: Write the failing contract test**
@@ -157,19 +158,20 @@ Expected: the notebook executes through the audit cells and the summary values s
 
 **Interfaces:**
 - Consumes: validated labels, `X_umap`, and normalized expression.
-- Produces: full cell-type UMAP, focused AM/AT1/AT2 UMAP, marker-coverage table, and marker dotplot.
+- Produces: full cell-type UMAP, focused macrophage-candidate/AT1/AT2 UMAP, AM-versus-IM/monocyte feature UMAPs, marker-coverage table, and marker dotplot.
 
 - [ ] **Step 1: Add failing figure-contract assertions**
 
 Assert that the executed notebook exposes figure captions/titles for:
 
 - all annotated lung cell types on UMAP;
-- macrophages, AT1, and AT2 highlighted on UMAP;
+- macrophage candidates, AT1, and AT2 highlighted on UMAP;
+- AM, IM, and monocyte/inflammatory marker evidence within the macrophage candidate pool;
 - marker expression prevalence and mean expression by cell type.
 
 - [ ] **Step 2: Define annotation evidence**
 
-Use the authors' released Figure 5 marker pairs:
+Use the authors' released Figure 5 marker pairs as positive source-label checks:
 
 ```python
 AUTHOR_MARKERS = {
@@ -181,16 +183,29 @@ AUTHOR_MARKERS = {
 
 Add panel-available supporting markers only after printing their availability and biological role. Show missing canonical markers such as `SFTPC` and `FABP4` in a separate availability table; never plot them as zeros.
 
+Use the following competing macrophage-identity evidence:
+
+```python
+MACROPHAGE_IDENTITY_MARKERS = {
+    "AM evidence": ["MARCO", "APOE"],
+    "IM evidence": ["LYVE1", "CD163", "FCGR3A", "MS4A4A"],
+    "Monocyte/inflammatory evidence": ["FCN1", "S100A12", "IL1B", "CLEC4E"],
+    "Pan-macrophage evidence": ["CD68", "AIF1", "MPEG1", "TYROBP"],
+}
+```
+
+Display feature UMAPs and dotplots for these groups. State that missing `FABP4/PPARG` and `FOLR2/MRC1/C1Q` genes limit certainty. Do not derive a final AM label in notebook 00.
+
 - [ ] **Step 3: Build Cell-style figures**
 
-Use a white background, Arial/DejaVu Sans fallback, 300 dpi, thin axes, rasterized scatter points, and explicit macaron colors. Reserve distinct focal colors for AM, AT1, and AT2 and render other cells in light grey in the focused UMAP. Use color plus direct labels/faceting so interpretation does not rely on color alone.
+Use a white background, Arial/DejaVu Sans fallback, 300 dpi, thin axes, rasterized scatter points, and explicit macaron colors. Reserve distinct focal colors for macrophage candidates, AT1, and AT2 and render other cells in light grey in the focused UMAP. Use color plus direct labels/faceting so interpretation does not rely on color alone.
 
 For the dotplot:
 
 - dot area = fraction of cells with expression > 0;
 - dot color = mean log-normalized expression among all cells in the group;
 - rows = published cell types in a fixed biological order;
-- columns = marker genes grouped by AM, AT1, and AT2;
+- columns = marker genes grouped by AM/IM/monocyte evidence, AT1, and AT2;
 - missing markers appear only in the adjacent coverage table.
 
 - [ ] **Step 4: Validate figure data**
@@ -205,7 +220,7 @@ Independently reconcile plotted group counts with `obs.celltype_final.value_coun
 
 **Interfaces:**
 - Consumes: full cells and centroids for each selected core.
-- Produces: all-cell spatial maps and AM/AT1/AT2-focused maps with equal aspect ratio.
+- Produces: all-cell spatial maps and macrophage-candidate/AT1/AT2-focused maps with equal aspect ratio.
 
 - [ ] **Step 1: Add failing spatial assertions**
 
@@ -217,7 +232,7 @@ Plot one panel per selected core using the same fixed cell-type palette as UMAP.
 
 - [ ] **Step 3: Plot focused populations**
 
-Render non-target cells in pale grey and overlay AT1, AT2, and macrophages with larger outlined points. Preserve the full core extent so apparent proximity is not created by zooming.
+Render non-target cells in pale grey and overlay AT1, AT2, and macrophage candidates with larger outlined points. Add separate spatial feature panels for `MARCO/APOE` versus measured IM/monocyte markers. Preserve the full core extent so apparent proximity is not created by zooming.
 
 - [ ] **Step 4: Inspect exported PNG and PDF**
 
@@ -256,7 +271,7 @@ Confirm no traceback outputs, bounded table sizes, non-empty figures, expected c
 
 - [ ] **Step 3: Update notebook conclusions**
 
-Write the `tl;dr` and `Takeaways` from executed results only. Separate verified annotation evidence, limitations, and unresolved questions. Do not infer MHCII-high/low states.
+Write the `tl;dr` and `Takeaways` from executed results only. Separate evidence supporting AM identity from IM/monocyte evidence and unresolved cells. Do not infer MHCII-high/low states or finalize the AM inclusion rule.
 
 - [ ] **Step 4: Update proposal change control**
 

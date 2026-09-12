@@ -4,7 +4,7 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 0.3
+**Version:** 0.4
 **Status:** Proposed design; awaiting scientific review before implementation
 **Created / last updated:** 2026-09-12
 
@@ -34,7 +34,7 @@ Every notebook will have one visible parameter cell with `RUN_MODE = "local_test
 
 ## Executive summary
 
-The analysis will test whether the broad Xenium `Macrophages` population contains two reproducible states corresponding to the mouse-defined **MHCII-low/ResAM1** and **MHCII-high/ResAM2** AM populations, and whether those states differ in spatial relationships with AT2 and other lung cells. Mouse `Cycling AM` is outside the research question and will be excluded from signature construction, state assignment, downstream comparisons, and interpretation.
+The published Xenium label `celltype_final == "Macrophages"` is a broad **macrophage candidate pool**, not an automatic AM definition. The analysis will first distinguish evidence for alveolar macrophages from interstitial macrophage or monocyte-like contamination, then test whether the validated AM population contains states corresponding to the mouse-defined **MHCII-low/ResAM1** and **MHCII-high/ResAM2** AM populations. Mouse `Cycling AM` is outside the research question and will be excluded.
 
 Spatial inference will be within tissue cores, with donor as the biological replicate and core nested within donor. Alveolar cores are primary; all regions form a sensitivity analysis. Nearest-cell distances, multi-radius neighborhoods, within-core permutations, and donor-aware models will evaluate AM-AT2 association. Ligand-receptor results will require measured genes, expression, spatial support, and donor reproducibility and will be interpreted as putative communication, not proof of signaling.
 
@@ -58,7 +58,7 @@ Candidate communication will be limited to panel-observable pairs, for example `
 
 ## Dataset interpretation
 
-The master object has 332,063 cells, 389 genes, 22 donors, and 70 cores. It contains donor/core metadata, QC, final cell labels, centroids, embeddings, and spatial/connectivity graphs. There are 33,375 `Macrophages` and 21,495 `AT2` cells. Every core contains both; 59 cores have at least 50 of each.
+The master object has 332,063 cells, 389 genes, 22 donors, and 70 cores. It contains donor/core metadata, QC, final cell labels, centroids, embeddings, and spatial/connectivity graphs. There are 33,375 cells labelled `Macrophages` and 21,495 labelled `AT2`. The 33,375 macrophage-labelled cells are candidates requiring AM-versus-IM validation; they must not be reported as 33,375 AMs. Every core contains both published labels; 59 cores have at least 50 of each.
 
 Regions comprise 40 alveolar, 22 vascular, 7 bronchial, and 1 core labelled literally `None`. Donors contribute one to four cores, so cells are not independent replicates. Centroids support cell-proximity analysis, but missing morphology images, polygons, and transcript coordinates preclude segmentation review, boundary-contact measurement, and subcellular localization.
 
@@ -166,16 +166,25 @@ Important limitations:
 
 Primary cohort:
 
-- `Macrophages` from the master H5AD;
+- validated alveolar macrophages selected from the published `Macrophages` candidate pool using the pre-MHCII identity-validation step;
 - alveolar (`A`) cores;
 - donors/cores passing existing QC and the stated minimum-cell rule.
+
+Identity-validation evidence:
+
+- alveolar macrophage evidence: `MARCO` and `APOE` (panel-measured), with canonical `FABP4`, `PPARG`, `INHBA`, `SIGLEC1`, `ITGAX`, `CD36`, and `ABCG1` unavailable;
+- interstitial macrophage evidence: `LYVE1`, `CD163`, `FCGR3A`, and `MS4A4A`, with `FOLR2`, `MRC1`, and `C1QA/B/C` unavailable;
+- monocyte/inflammatory evidence: `FCN1`, `S100A12`, `IL1B`, and `CLEC4E`;
+- pan-macrophage confirmation: `CD68`, `AIF1`, `MPEG1`, and `TYROBP`.
 
 Sensitivity cohorts:
 
 1. all regions with region adjustment or stratification;
 2. stricter macrophage and AT2 cell-count thresholds;
-3. cells restricted by a panel-derived AM-likeness score;
+3. conservative AM-like cells with stronger `MARCO/APOE` evidence than IM/monocyte evidence;
 4. exclusion of the core labelled literally `None`.
+
+**AM identity decision gate:** notebook 00 will show UMAP, dotplot, feature-expression, and whole-core spatial evidence for AM, IM, and monocyte programs. A final AM gate will be approved only after review. It must avoid a threshold that selectively removes MHCII-high AMs, and downstream results will include sensitivity to conservative exclusion of IM/monocyte-like cells.
 
 Analysis units:
 
@@ -196,10 +205,12 @@ Cell-level P values that ignore donor/core dependence will not be primary eviden
 
 ### Phase 2 - Macrophage and AT2 cohorts
 
-1. Subset macrophage-labelled and AT2-labelled cells from the master.
+1. Subset published macrophage-labelled candidates, monocytes, AT1, and AT2 from the master without relabelling them.
 2. Tabulate counts by donor, core, region, age, and sex.
 3. Flag sparse cores. The default primary spatial-summary threshold is at least 50 macrophages and 50 AT2; retain smaller cores only where statistically valid and report threshold sensitivity.
-4. Check expression/QC for contamination, doublets, and region-specific artifacts.
+4. Compare AM, IM, monocyte/inflammatory, and pan-macrophage marker evidence on UMAP, dotplots, feature plots, and whole-core spatial maps.
+5. Define the AM analysis population only after visual and quantitative review. Preserve the original label and store the derived AM inclusion flag, score components, rule version, and confidence separately.
+6. Check expression/QC for contamination, doublets, and region-specific artifacts.
 
 ### Phase 3 - Two-state AM definition
 
@@ -317,7 +328,7 @@ Planned notebooks:
 
 | Notebook | Purpose | Main checks and outputs |
 |---|---|---|
-| `00_methodology_data_audit.ipynb` | Reader-facing explanation and input validation | Paths/modes, hashes, H5AD schema, matrix layers, labels, missingness, duplicate IDs, coordinate/core integrity, donor/core/region counts, QC plots, and explicit source cell definitions. |
+| `00_methodology_data_audit.ipynb` | Annotation and input validation | Paths/modes, hashes, H5AD schema, published labels, AM-versus-IM/monocyte marker evidence, AT1/AT2 evidence, UMAPs, marker dotplots/feature plots, whole-core spatial maps, QC, and explicit separation of source labels from derived identities. |
 | `01_mouse_MHCII_signature_mapping.ipynb` | Reproduce mouse cutoffs and build human-panel signatures | Audit both DE CSVs, exclude Cycling AM, formal ortholog mapping, panel overlap, group-direction comparison, final MHCII-low/high gene tables, and coverage limitations. |
 | `02_human_AM_MHCII_states.ipynb` | Score and validate human macrophage states | Macrophage/AT2 cohorts, score construction, continuous distributions, one- versus two-component comparison, posterior confidence, donor/core stability, pseudobulk validation, and state-assignment export. |
 | `03_AM_spatial_neighborhoods.ipynb` | Locations, nearest cells, and neighborhoods | Whole-core geometry, representative maps, nearest-AT2 distances, nearest non-AM identity, 20/30/50/100 um neighborhoods, boundary/density checks, within-core permutations, and donor-aware effect estimates. |
@@ -406,7 +417,8 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | Canonical AM/AT2 genes are absent | Use observable signatures, report coverage, rely cautiously on provided AT2 labels, and avoid unmeasured-mechanism claims. |
 | Mouse DE is one-versus-rest and included Cycling AM | Exclude Cycling AM rows, require coherent ResAM1/ResAM2 direction, document the limitation, and replace with direct pairwise DE if the mouse object becomes available. |
 | Expanded panel signatures contain few significant genes | Report coverage and single-gene influence; use unweighted means as primary, bounded weights as sensitivity, and do not claim full mouse-state conservation. |
-| Broad macrophage label includes non-AMs | Use alveolar cores, AM-likeness sensitivity, donor/core marker review, and uncertain labels. |
+| Broad macrophage label includes interstitial macrophages or monocyte-like cells | Treat it only as a candidate pool; compare AM/IM/monocyte programs on UMAP and spatial maps; approve an AM flag before MHCII analysis; preserve ambiguous cells and sensitivity analyses. |
+| Only two canonical AM markers are measured | Combine `MARCO/APOE` with negative evidence from measured IM/monocyte programs and spatial context; report the incomplete marker coverage and avoid overconfident AM claims. |
 | States form a continuum | Compare mixture, clustering, and scores; use a continuous exposure if hard labels are unstable. |
 | Cell-level pseudoreplication | Use donor-aware models, core summaries, within-core permutations, and leave-one-donor-out tests. |
 | Density/boundary bias | Use local expectations, density covariates, spatial nulls, and boundary sensitivity. |
@@ -417,11 +429,12 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 ## Decision gates before implementation
 
 1. Approve this proposal and the mouse-derived MHCII-high/low framing.
-2. Approve the expanded-signature rule: full `ResAM1`/`ResAM2` DE table, adjusted P < 0.05, positive fold change, coherent relative direction, no 0.5 fold-change cutoff, and formal ortholog mapping.
-3. Select and version the ligand-receptor resource.
-4. Retain alveolar cores as primary unless a recorded scientific reason changes this.
-5. Accept hard two-state labels only if stability criteria pass; otherwise use continuous scores.
-6. Edit the Word manuscript only after results/figure review and explicit authorization.
+2. Review notebook 00 and approve the AM-versus-IM/monocyte inclusion rule before MHCII scoring.
+3. Approve the expanded-signature rule: full `ResAM1`/`ResAM2` DE table, adjusted P < 0.05, positive fold change, coherent relative direction, no 0.5 fold-change cutoff, and formal ortholog mapping.
+4. Select and version the ligand-receptor resource.
+5. Retain alveolar cores as primary unless a recorded scientific reason changes this.
+6. Accept hard two-state labels only if stability criteria pass; otherwise use continuous scores.
+7. Edit the Word manuscript only after results/figure review and explicit authorization.
 
 ## Change log
 
@@ -430,3 +443,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 0.1 | 2026-09-12 | All | Initial proposal created after inspection of the Xenium folder, official Figure 5 code, and target manuscript. It establishes required files, paper-panel mapping, a donor-aware two-state AM design, spatial/AT2 analyses, communication requirements, and living-document controls. | Reviewable source of truth before implementation. |
 | 0.2 | 2026-09-12 | Document control; planned structure | Made `XTY_AM_project` the authoritative version-controlled working root and added the requirement to verify, commit, and push every material change. The parent proposal remains an immutable version 0.1 snapshot. | Future proposal, code, configuration, and eligible outputs are auditable through Git and the configured remote. |
 | 0.3 | 2026-09-12 | Computing locations; inputs; AM definition; notebook architecture; Git structure; validation; risks; manuscript plan | Added local/HPC paths and run modes; made the full mouse `ResAM1`/`ResAM2` DE table authoritative; excluded Cycling AM; removed the 0.5 fold-change restriction; corrected scoring, mixture, and donor-bias safeguards; replaced standalone scripts with seven inspectable notebooks; and defined Git/HPC validation and artifact policies. | Makes the methodology consistent with the mouse MHCII-high/low origin and creates a locally testable, HPC-runnable, auditable notebook workflow. |
+| 0.4 | 2026-09-12 | Executive summary; dataset interpretation; cohorts; Phase 2; notebook 00; risks; decision gates | Clarified that the published `Macrophages` label is only a candidate pool. Added explicit AM-versus-interstitial-macrophage/monocyte validation using measured positive and negative marker evidence plus spatial context, with a review gate before MHCII subtyping. | Prevents interstitial macrophages from being silently analyzed or reported as alveolar macrophages while retaining activated MHCII-high AMs for review. |
