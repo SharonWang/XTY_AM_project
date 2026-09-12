@@ -1,0 +1,20 @@
+# Isolated development worktrees
+.worktrees/
+
+# Jupyter and Python caches
+.ipynb_checkpoints/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# Large source and intermediate data
+*.h5ad
+*.h5
+*.pkl
+*.rds
+*.loom
+*.zarr/
+
+# Unrestricted full-run outputs
+outputs/hpc_full/
+logs/*.log
