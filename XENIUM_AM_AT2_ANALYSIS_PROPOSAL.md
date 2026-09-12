@@ -4,7 +4,7 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 0.2
+**Version:** 0.3
 **Status:** Proposed design; awaiting scientific review before implementation
 **Created / last updated:** 2026-09-12
 
@@ -15,15 +15,26 @@ This is the living source of truth for the Xenium AM-AT2 analysis. Every materia
 1. the version and last-updated date;
 2. the affected section;
 3. the change log, including rationale and expected effect; and
-4. affected configuration or scripts.
+4. affected configuration or notebooks.
 
 Outputs are not current until these items agree. If the proposal and analysis configuration conflict, record the resolution in the change log. Do not overwrite source data. Keep versioned analysis documents, code, configuration, logs, and normal-sized derived outputs under the D: repository root; keep the supplied Xenium source data at the declared D: data root. Create or modify no project files on C:.
 
-Every material project change must be committed and pushed to the configured Git remote after verification. Commit messages must describe the scientific or technical change. Large source datasets and oversized derived artifacts must not be added to Git; track manifests, hashes, scripts, summaries, and appropriately sized source-data tables instead.
+Every material project change must be committed and pushed to the configured Git remote after verification. Commit messages must describe the scientific or technical change. Large source datasets and oversized derived artifacts must not be added to Git; track manifests, hashes, notebooks, summaries, and appropriately sized source-data tables instead.
+
+## Computing locations and execution modes
+
+| Setting | Analysis/repository path | Data path |
+|---|---|---|
+| Local development | `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project` | `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial` |
+| HPC full analysis | `/dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/analysis_v1` | `/dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/data/Spatial` |
+
+Every notebook will have one visible parameter cell with `RUN_MODE = "local_test"` or `RUN_MODE = "hpc_full"`. Environment variables may override the default paths. The analysis logic must be identical between modes.
+
+`local_test` will use complete cells from a deterministic small set of whole tissue cores. It will not subsample cells inside a selected core because doing so would corrupt nearest-neighbor distances and neighborhood composition. The local outputs validate code, data flow, plots, and statistical calculations only; they are not biological results. `hpc_full` will use all eligible cores and is the only mode used for manuscript inference.
 
 ## Executive summary
 
-The analysis will test whether the broad Xenium `Macrophages` population contains two reproducible AM states and whether those states differ in spatial relationships with AT2 and other lung cells. The working comparison is an **early/resident-like state** versus an **adapted-like/MHC-II-inflammatory state**, defined only with genes measured by the 389-gene panel. A two-state result will not be forced if the evidence instead supports a continuum or more states.
+The analysis will test whether the broad Xenium `Macrophages` population contains two reproducible states corresponding to the mouse-defined **MHCII-low/ResAM1** and **MHCII-high/ResAM2** AM populations, and whether those states differ in spatial relationships with AT2 and other lung cells. Mouse `Cycling AM` is outside the research question and will be excluded from signature construction, state assignment, downstream comparisons, and interpretation.
 
 Spatial inference will be within tissue cores, with donor as the biological replicate and core nested within donor. Alveolar cores are primary; all regions form a sensitivity analysis. Nearest-cell distances, multi-radius neighborhoods, within-core permutations, and donor-aware models will evaluate AM-AT2 association. Ligand-receptor results will require measured genes, expression, spatial support, and donor reproducibility and will be interpreted as putative communication, not proof of signaling.
 
@@ -39,10 +50,9 @@ Primary questions:
 
 Secondary questions address continuous age, sex, tissue region, cross-species agreement with the manuscript's mouse AM states, and robustness to classification and spatial choices.
 
-Working markers are:
+The authoritative mouse signature source is `BD_DEgenes.csv`. For each of `ResAM1` and `ResAM2`, candidate genes must have adjusted P < 0.05, positive log fold change for that group, a documented mouse-human ortholog, and presence in the Xenium panel. The previous log-fold-change > 0.5 cutoff will not be imposed. `BD_AM_MHCII_SigDEgenes.csv` is retained to reproduce and audit the earlier high-confidence selection, not to limit the Xenium signature.
 
-- early/resident-like: `MARCO`, `VSIG4`, `APOE`, `CD163`, with `CHIT1` supportive;
-- adapted-like/MHC-II-inflammatory: `CD74`, `HLA-DQB1`, `CD14`, `CD44`, `ICAM1`, `CXCL9`, and `CXCL10`.
+Provisional same-symbol matching identifies five MHCII-low candidates (`CTSL`, `MPEG1`, `CD2`, `CD68`, `CD44`) and nine MHCII-high candidates (`CD74`, `TNF`, `CXCL2`, `IL1B`, `CLEC4E`, `CD14`, `FN1`, `PIM1`, `MCEMP1`). These are not final until a versioned ortholog table resolves mouse `H2-*` and other non-identical symbols.
 
 Candidate communication will be limited to panel-observable pairs, for example `SPP1-CD44`, `MIF-CD74/CD44/CXCR4`, `APP-CD74`, and directionally appropriate WNT-receptor pairs.
 
@@ -59,6 +69,8 @@ Regions comprise 40 alveolar, 22 vascular, 7 bronchial, and 1 core labelled lite
 | File | Requirement | Purpose |
 |---|---|---|
 | `Spatial\Spatial\xenium.h5ad` | **Required** | Authoritative expression, metadata, cell labels, donor/core structure, and spatial centroids. This is the only existing file strictly indispensable for the requested analysis. |
+| `BD_DEgenes.csv` | **Required** | Complete mouse DE results for `ResAM1`, `ResAM2`, and `Cycling AM`. Only `ResAM1` and `ResAM2` rows enter the analysis. |
+| `BD_AM_MHCII_SigDEgenes.csv` | Audit/reference | Reproduces the previous high-confidence cutoff list; used to verify selection logic but not to limit panel-overlapping genes. |
 | `Spatial\Spatial\myeloid_xenium.h5ad` | Recommended | Efficient AM working subset. Validate cell IDs and values against the master; regenerate from the master if inconsistent. |
 | `Spatial\Spatial\epithelial_xenium.h5ad` | Optional | Convenient AT2 validation subset. AT2 membership and coordinates remain authoritative in the master. |
 
@@ -77,7 +89,7 @@ These files are unnecessary if neighborhoods are recomputed transparently from t
 | Resource | Requirement | Provenance rule |
 |---|---|---|
 | Versioned human ligand-receptor resource | Required for formal communication analysis | Store under `reference\` with source URL, version/date, license, download date, and filtering record. |
-| Mouse early/adapted AM signatures from the manuscript | Required for cross-species comparison | Store exact signatures and origins under `reference\`; map orthologs and intersect with the 389-gene panel. |
+| Mouse MHCII-low/ResAM1 and MHCII-high/ResAM2 signatures | Required for cross-species comparison | Derive from `BD_DEgenes.csv`, store the processed signatures and provenance under `reference\`, map orthologs, and intersect with the 389-gene panel. |
 | Xu et al. Figure 5 code | Already available | `reference\sc_Aging_clock\Figure 5`; use for conventions and panel mapping, not as an unreviewed dependency. |
 
 ### Manuscript for final integration
@@ -192,16 +204,22 @@ Cell-level P values that ignore donor/core dependence will not be primary eviden
 ### Phase 3 - Two-state AM definition
 
 1. Use a documented normalization suitable for the targeted panel; retain raw counts for count-aware models.
-2. Construct early/resident-like and adapted-like/MHC-II-inflammatory scores from the measured markers listed above.
-3. Compare:
-   - a two-component model on the score contrast;
-   - donor-aware unsupervised clustering plus biological annotation;
-   - nearest-centroid/signature assignment from ortholog-mapped, panel-intersected mouse signatures.
-4. Assess marker consistency, separation, donor mixing, bootstrap stability, and leave-one-donor-out stability.
-5. Test solutions with two to four states. Do not force two groups if unstable.
-6. Retain classification confidence and an `uncertain` sensitivity label.
+2. Reproduce the supplied mouse tables before using them:
+   - `ResAM1` and `ResAM2` high-confidence genes exactly equal adjusted P < 0.05 and log fold change > 0.5;
+   - `Cycling AM` is excluded from the scientific analysis;
+   - record that the supplied statistics appear to be one-versus-rest, not a direct `ResAM2` versus `ResAM1` contrast.
+3. Map all mouse `ResAM1` and `ResAM2` genes to human orthologs with a saved, versioned mapping. Document one-to-many, many-to-one, and unmapped cases; do not rely on capitalization alone.
+4. Intersect mapped genes with the Xenium panel. Define the expanded group-specific sets using adjusted P < 0.05 and positive log fold change, without the former 0.5 fold-change cutoff. Require the opposite group to have a lower effect estimate; report its direction and adjusted P for every retained gene.
+5. Calculate separate unweighted mean scores for MHCII-high and MHCII-low using gene-wise standardized log-normalized expression, then calculate the contrast `MHCII-high score - MHCII-low score`. Use means so unequal signature sizes do not mechanically favor one state.
+6. Preserve between-donor biological differences in the primary pooled score. A donor-centered score is allowed only as a sensitivity analysis for within-donor spatial comparisons because donor-centering would invalidate age-related score comparisons and could distort state proportions.
+7. Use mouse log-fold-change weighting only as a sensitivity analysis; prevent a single large-effect gene from dominating by pre-specified weight clipping or rank scaling.
+8. Compare a continuous-score model with pooled one- and two-component mixture models fitted with donor-balanced weights. Do not use a median split or fit independent donor-specific thresholds that force similar state proportions.
+9. Assess component separation, posterior confidence, marker direction, donor/core representation, bootstrap stability, and leave-one-donor-out transfer. Retain an `uncertain` label for low posterior confidence.
+10. Validate state differences with donor/core pseudobulk summaries and raw-count-aware models; cell-level P values are descriptive only.
 
-**Decision gate:** use the method with best donor-level stability and panel-supported interpretation. If no stable two-state result emerges, use continuous scores as primary exposures and hard labels only descriptively.
+**Decision gate:** hard MHCII-high and MHCII-low labels are primary only if a two-component model improves fit and transfers across donors without being driven by QC or region. Otherwise the continuous MHCII contrast is primary and hard labels are descriptive.
+
+**Mouse-comparison limitation:** because the supplied DE is one-versus-rest and included Cycling AM in the reference pool, it is not identical to direct `ResAM2` versus `ResAM1` DE. Genes must therefore show coherent relative direction across both group rows. If the mouse expression object becomes available, direct pairwise donor-aware DE supersedes this approximation.
 
 ### Phase 4 - Spatial localization and nearest cells
 
@@ -252,7 +270,7 @@ Report these as **putative spatially supported ligand-receptor interactions**. C
 
 ### Phase 8 - Cross-species interpretation
 
-1. Extract the manuscript's mouse early/adapted AM signatures.
+1. Derive the mouse MHCII-low/ResAM1 and MHCII-high/ResAM2 signatures from the supplied DE table.
 2. Map mouse-human orthologs and intersect with the Xenium panel.
 3. Score human macrophages and report signature coverage.
 4. Separate conserved evidence from untestable mechanisms; an unmeasured marker is not biologically absent.
@@ -276,42 +294,102 @@ Report these as **putative spatially supported ligand-receptor interactions**. C
 4. Headline markers have consistent direction in most informative donors.
 5. Primary spatial effects remain directionally consistent under leave-one-donor-out analysis and at least two reasonable count thresholds.
 6. Communication candidates have measured genes, documented provenance, expression support, spatial support, and donor replication.
-7. Scripts regenerate all outputs from declared inputs without manual editing.
+7. Notebooks regenerate all outputs from declared inputs without manual editing.
 8. Every final figure has source data and an audit trail.
 
-## Planned structure and deliverables
+## Notebook architecture
 
-All new files remain under the project root:
+All analytical work will be performed in clearly commented Jupyter notebooks. Python is primary because the source is AnnData/H5AD and the spatial operations use SciPy/Scanpy-compatible structures. A dedicated R notebook may be used where `glmmTMB`, `lme4`, or another validated mixed-model implementation is preferable. Standalone analysis scripts will not be the scientific source of truth.
+
+Each notebook must follow this visible sequence:
+
+1. `tl;dr` updated only after successful execution;
+2. context, question, cell definitions, and assumptions;
+3. parameter cell with run mode, paths, seed, and thresholds;
+4. required-input and schema checks that fail clearly;
+5. methods in Markdown immediately before focused code cells;
+6. bounded tables and labelled plots;
+7. statistical checks, effect sizes, intervals, and multiplicity handling;
+8. limitations and claims that are or are not supported;
+9. output manifest and takeaways tied to executed values.
+
+Planned notebooks:
+
+| Notebook | Purpose | Main checks and outputs |
+|---|---|---|
+| `00_methodology_data_audit.ipynb` | Reader-facing explanation and input validation | Paths/modes, hashes, H5AD schema, matrix layers, labels, missingness, duplicate IDs, coordinate/core integrity, donor/core/region counts, QC plots, and explicit source cell definitions. |
+| `01_mouse_MHCII_signature_mapping.ipynb` | Reproduce mouse cutoffs and build human-panel signatures | Audit both DE CSVs, exclude Cycling AM, formal ortholog mapping, panel overlap, group-direction comparison, final MHCII-low/high gene tables, and coverage limitations. |
+| `02_human_AM_MHCII_states.ipynb` | Score and validate human macrophage states | Macrophage/AT2 cohorts, score construction, continuous distributions, one- versus two-component comparison, posterior confidence, donor/core stability, pseudobulk validation, and state-assignment export. |
+| `03_AM_spatial_neighborhoods.ipynb` | Locations, nearest cells, and neighborhoods | Whole-core geometry, representative maps, nearest-AT2 distances, nearest non-AM identity, 20/30/50/100 um neighborhoods, boundary/density checks, within-core permutations, and donor-aware effect estimates. |
+| `04_AM_AT2_communication.ipynb` | Panel-constrained cell-cell communication | Versioned ligand-receptor import, gene intersection, AM-to-AT2 and AT2-to-AM directions, expression/prevalence filters, spatial support, donor consistency, FDR, and ranked interactions. |
+| `05_integrated_statistics_figures.ipynb` | Final statistical QA and figures | Primary/secondary endpoint registry, mixed models, age/sex/region analyses, leave-one-donor-out checks, sensitivity analyses, final figures, source-data tables, and claim-to-evidence audit. |
+| `06_manuscript_methods_results.ipynb` | Reproducible manuscript text support | Executed numbers for Methods, Results, legends, limitations, and the proposed Figure 7 section; no direct Word edit without authorization. |
+
+Notebook dependencies are sequential. A downstream notebook must read saved, versioned tables from the prior notebook rather than depend on hidden in-memory state. Each output records the producing notebook, proposal version, run mode, timestamp, input hashes, software versions, and parameter hash.
+
+## Git directory structure
 
 ```text
-D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project\
+XTY_AM_project/
 |-- XENIUM_AM_AT2_ANALYSIS_PROPOSAL.md
-|-- reference\
-|-- config\
-|-- scripts\
-|-- outputs\
-|   |-- audit\
-|   |-- qc\
-|   |-- am_states\
-|   |-- spatial\
-|   |-- communication\
-|   |-- tables\
-|   `-- figures\
-`-- logs\
+|-- README.md
+|-- .gitignore
+|-- config/
+|   `-- analysis_config.yaml
+|-- notebooks/
+|   |-- 00_methodology_data_audit.ipynb
+|   |-- 01_mouse_MHCII_signature_mapping.ipynb
+|   |-- 02_human_AM_MHCII_states.ipynb
+|   |-- 03_AM_spatial_neighborhoods.ipynb
+|   |-- 04_AM_AT2_communication.ipynb
+|   |-- 05_integrated_statistics_figures.ipynb
+|   `-- 06_manuscript_methods_results.ipynb
+|-- reference/
+|   |-- orthologs/
+|   `-- ligand_receptor/
+|-- environment/
+|   |-- environment.yml
+|   `-- renv.lock
+|-- outputs/
+|   |-- local_test/
+|   |-- hpc_full/
+|   `-- manuscript_ready/
+|-- logs/
+`-- docs/
 ```
 
-Deliverables will include an input/hash manifest, frozen configuration, audit/cohort report, per-cell state assignments and confidence, donor/core state summaries, spatial source tables, model/permutation results, a provenance-rich AM-AT2 interaction table, reproducible scripts, manuscript-ready figures with source data, and Methods/Results/legends/limitations text.
+The repository will contain notebooks, configuration, environment locks, small reference tables with provenance, bounded local-test outputs, final summary/source-data tables, and manuscript-ready plots of reasonable size. It will not contain raw H5AD/PKL/RDS data, large intermediate matrices, full spatial neighbor graphs, caches, checkpoints, or unrestricted HPC outputs. Those exclusions will be enforced in `.gitignore`.
+
+Local-test notebooks will be executed top-to-bottom and retain bounded outputs so plots, checks, and calculations can be inspected immediately. Full HPC notebooks will write to the HPC `analysis_v1/outputs/hpc_full` tree. Large full-run artifacts remain outside Git; hashes, manifests, summary tables, model outputs, and final figures are committed when appropriately sized.
+
+## Validation, commit, and HPC handoff
+
+For every notebook change:
+
+1. run a structural notebook check with `nbformat`;
+2. execute top-to-bottom in `local_test` mode with the same functions used on HPC;
+3. inspect executed tables/plots and reconcile key counts independently;
+4. run code-quality and statistical assertions;
+5. confirm outputs are bounded and no source data enter Git;
+6. run Git whitespace/diff checks;
+7. update this proposal and change log for material method changes;
+8. commit with a descriptive message and push immediately;
+9. report a failed push explicitly and retain the local commit for retry.
+
+The exact HPC execution command and environment activation will be recorded in `README.md` and in each notebook. The HPC run is acceptable only after all local-test checks pass and the software environment is reproduced from the committed lock file.
+
+Deliverables include an input/hash manifest, audit/cohort report, ortholog and final signature tables, per-cell state assignments with confidence, donor/core state summaries, spatial source tables, model/permutation results, provenance-rich AM-AT2 interactions, manuscript-ready figures, source data, and executable Methods/Results/legend support.
 
 ## Manuscript placement and figure
 
 Insert the human Xenium Results section after **"Adapted AMs support epithelial differentiation and lung homeostasis"** and before the Discussion. Working title:
 
-> Human spatial transcriptomics identifies conserved AM states and preferential association of adapted-like AMs with AT2 cells
+> Human spatial transcriptomics identifies mouse-derived MHCII AM states and their spatial relationships with AT2 cells
 
 The expected main figure is Figure 7, subject to final numbering:
 
 1. dataset/cohort overview;
-2. AM embedding, state scores, and markers;
+2. MHCII-high/low AM scores, state evidence, and markers;
 3. state proportions by donor and age;
 4. representative spatial maps;
 5. nearest-AT2 distance and AT2 enrichment;
@@ -326,6 +404,8 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | Risk | Mitigation |
 |---|---|
 | Canonical AM/AT2 genes are absent | Use observable signatures, report coverage, rely cautiously on provided AT2 labels, and avoid unmeasured-mechanism claims. |
+| Mouse DE is one-versus-rest and included Cycling AM | Exclude Cycling AM rows, require coherent ResAM1/ResAM2 direction, document the limitation, and replace with direct pairwise DE if the mouse object becomes available. |
+| Expanded panel signatures contain few significant genes | Report coverage and single-gene influence; use unweighted means as primary, bounded weights as sensitivity, and do not claim full mouse-state conservation. |
 | Broad macrophage label includes non-AMs | Use alveolar cores, AM-likeness sensitivity, donor/core marker review, and uncertain labels. |
 | States form a continuum | Compare mixture, clustering, and scores; use a continuous exposure if hard labels are unstable. |
 | Cell-level pseudoreplication | Use donor-aware models, core summaries, within-core permutations, and leave-one-donor-out tests. |
@@ -336,8 +416,8 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 
 ## Decision gates before implementation
 
-1. Approve this proposal and the two-state framing.
-2. Approve the exact mouse early/adapted signatures or authorize extraction.
+1. Approve this proposal and the mouse-derived MHCII-high/low framing.
+2. Approve the expanded-signature rule: full `ResAM1`/`ResAM2` DE table, adjusted P < 0.05, positive fold change, coherent relative direction, no 0.5 fold-change cutoff, and formal ortholog mapping.
 3. Select and version the ligand-receptor resource.
 4. Retain alveolar cores as primary unless a recorded scientific reason changes this.
 5. Accept hard two-state labels only if stability criteria pass; otherwise use continuous scores.
@@ -349,3 +429,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 |---|---|---|---|---|
 | 0.1 | 2026-09-12 | All | Initial proposal created after inspection of the Xenium folder, official Figure 5 code, and target manuscript. It establishes required files, paper-panel mapping, a donor-aware two-state AM design, spatial/AT2 analyses, communication requirements, and living-document controls. | Reviewable source of truth before implementation. |
 | 0.2 | 2026-09-12 | Document control; planned structure | Made `XTY_AM_project` the authoritative version-controlled working root and added the requirement to verify, commit, and push every material change. The parent proposal remains an immutable version 0.1 snapshot. | Future proposal, code, configuration, and eligible outputs are auditable through Git and the configured remote. |
+| 0.3 | 2026-09-12 | Computing locations; inputs; AM definition; notebook architecture; Git structure; validation; risks; manuscript plan | Added local/HPC paths and run modes; made the full mouse `ResAM1`/`ResAM2` DE table authoritative; excluded Cycling AM; removed the 0.5 fold-change restriction; corrected scoring, mixture, and donor-bias safeguards; replaced standalone scripts with seven inspectable notebooks; and defined Git/HPC validation and artifact policies. | Makes the methodology consistent with the mouse MHCII-high/low origin and creates a locally testable, HPC-runnable, auditable notebook workflow. |
