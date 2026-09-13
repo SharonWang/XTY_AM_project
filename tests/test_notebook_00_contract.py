@@ -65,35 +65,11 @@ def test_local_notebook_executes_and_writes_validated_summary(
     assert summary["celltype_counts"]["AT1"] > 0
     assert summary["celltype_counts"]["AT2"] > 0
     assert summary["duplicate_cell_ids"] == 0
-
-    expected_figures = [
-        "umap_all_celltypes",
-        "umap_focus_macrophage_AT1_AT2",
-        "dotplot_annotation_markers",
-        "umap_macrophage_identity_features",
-        "spatial_all_celltypes",
-        "spatial_focus_macrophage_AT1_AT2",
-        "spatial_macrophage_identity_features",
-    ]
-    for stem in expected_figures:
-        for suffix in (".png", ".pdf"):
-            figure_path = tmp_path / "figures" / f"{stem}{suffix}"
-            assert figure_path.exists(), figure_path
-            assert figure_path.stat().st_size > 1_000, figure_path
-
-    availability = summary["marker_availability"]
-    assert availability["MARCO"] is True
-    assert availability["APOE"] is True
-    assert availability["AGER"] is True
-    assert availability["SFTPD"] is True
-    assert availability["FABP4"] is False
-    assert availability["SFTPC"] is False
+    assert summary["umap_cells_plotted"] == summary["n_cells"]
+    assert len(summary["selected_cores"]) == 4
+    assert summary["spatial_display_strategy"] == "four_representative_complete_alveolar_cores"
     assert summary["expression_zero_pattern_concordance"] > 0.999
 
-    marker_table = tmp_path / "tables" / "annotation_marker_summary.csv"
-    assert marker_table.exists()
-    assert marker_table.stat().st_size > 100
-
     expected_figures = [
         "umap_all_celltypes",
         "umap_focus_macrophage_AT1_AT2",
@@ -110,40 +86,25 @@ def test_local_notebook_executes_and_writes_validated_summary(
             assert figure_path.stat().st_size > 1_000, figure_path
 
     availability = summary["marker_availability"]
-    assert availability["MARCO"] is True
-    assert availability["APOE"] is True
-    assert availability["AGER"] is True
-    assert availability["SFTPD"] is True
+    required_measured = {
+        "AGER", "SCEL", "SFTPD", "PLA2G4F", "MARCO", "APOE",
+        "LYVE1", "CD163", "FCGR3A", "MS4A4A",
+        "FCN1", "S100A12", "IL1B", "CLEC4E",
+    }
+    assert all(availability[gene] is True for gene in required_measured)
     assert availability["FABP4"] is False
     assert availability["SFTPC"] is False
 
-    marker_table = tmp_path / "tables" / "annotation_marker_summary.csv"
-    assert marker_table.exists()
-    assert marker_table.stat().st_size > 100
-
-    expected_figures = [
-        "umap_all_celltypes",
-        "umap_focus_macrophage_AT1_AT2",
-        "dotplot_annotation_markers",
-        "umap_macrophage_identity_features",
-        "spatial_all_celltypes",
-        "spatial_focus_macrophage_AT1_AT2",
-        "spatial_macrophage_identity_features",
+    expected_tables = [
+        "annotation_marker_summary.csv",
+        "annotation_marker_summary_by_core.csv",
+        "annotation_marker_summary_by_donor.csv",
+        "macrophage_candidate_program_scores_local_or_full.csv",
+        "macrophage_program_summary_by_core.csv",
+        "macrophage_program_summary_by_donor.csv",
+        "marker_availability.csv",
     ]
-    for stem in expected_figures:
-        for suffix in (".png", ".pdf"):
-            figure_path = tmp_path / "figures" / f"{stem}{suffix}"
-            assert figure_path.exists(), figure_path
-            assert figure_path.stat().st_size > 1_000, figure_path
-
-    availability = summary["marker_availability"]
-    assert availability["MARCO"] is True
-    assert availability["APOE"] is True
-    assert availability["AGER"] is True
-    assert availability["SFTPD"] is True
-    assert availability["FABP4"] is False
-    assert availability["SFTPC"] is False
-
-    marker_table = tmp_path / "tables" / "annotation_marker_summary.csv"
-    assert marker_table.exists()
-    assert marker_table.stat().st_size > 100
+    for name in expected_tables:
+        table_path = tmp_path / "tables" / name
+        assert table_path.exists(), table_path
+        assert table_path.stat().st_size > 100, table_path

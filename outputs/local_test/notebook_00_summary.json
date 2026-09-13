@@ -40,6 +40,8 @@
     "dotplot_size": "fraction raw.X > 0"
   },
   "expression_zero_pattern_concordance": 1.0,
+  "umap_cells_plotted": 332063,
+  "spatial_display_strategy": "four_representative_complete_alveolar_cores",
   "marker_availability": {
     "AGER": true,
     "SCEL": true,

@@ -4,9 +4,10 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 0.5
+**Version:** 0.6
 **Status:** Notebook 00 implemented and locally validated; awaiting scientific review of annotation evidence
-**Created / last updated:** 2026-09-12
+**Created:** 2026-09-12
+**Last updated:** 2026-09-13
 
 ## Document control
 
@@ -445,3 +446,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 0.3 | 2026-09-12 | Computing locations; inputs; AM definition; notebook architecture; Git structure; validation; risks; manuscript plan | Added local/HPC paths and run modes; made the full mouse `ResAM1`/`ResAM2` DE table authoritative; excluded Cycling AM; removed the 0.5 fold-change restriction; corrected scoring, mixture, and donor-bias safeguards; replaced standalone scripts with seven inspectable notebooks; and defined Git/HPC validation and artifact policies. | Makes the methodology consistent with the mouse MHCII-high/low origin and creates a locally testable, HPC-runnable, auditable notebook workflow. |
 | 0.4 | 2026-09-12 | Executive summary; dataset interpretation; cohorts; Phase 2; notebook 00; risks; decision gates | Clarified that the published `Macrophages` label is only a candidate pool. Added explicit AM-versus-interstitial-macrophage/monocyte validation using measured positive and negative marker evidence plus spatial context, with a review gate before MHCII subtyping. | Prevents interstitial macrophages from being silently analyzed or reported as alveolar macrophages while retaining activated MHCII-high AMs for review. |
 | 0.5 | 2026-09-12 | Status; notebook 00 implementation; validation | Implemented the first executable notebook with the deposited UMAP, focused macrophage/AT1/AT2 UMAP, marker dotplot, competing AM/IM/monocyte evidence scores, and complete-core spatial maps. Local testing uses four deterministic intact alveolar cores for expression-heavy steps. Corrected backed raw-count marker extraction to use explicit raw-variable indices and added an exact zero-pattern concordance assertion between transformed and raw matrices. | Makes annotation review immediately reproducible while preventing gene-column misalignment from corrupting detection fractions. No AM inclusion rule or MHCII state is finalized. |
+| 0.6 | 2026-09-13 | Notebook 00 UMAP, HPC display, descriptive summaries, validation tests | Independent review identified and corrected three issues: the overview now plots all 332,063 cells rather than a stratified subset; both local and HPC modes use four deterministic complete alveolar cores for bounded spatial display while HPC marker calculations use all cells; and marker dotplots now average donor-level summaries equally. Added donor/core marker tables, donor/core macrophage-program summaries, stronger marker/HPC/display contracts, and clearer plot-title spacing. | Meets the full-UMAP requirement, prevents unbounded 70-core HPC figures, and removes unequal-cell-count donor dominance from descriptive marker summaries. |
