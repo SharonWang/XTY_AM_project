@@ -84,6 +84,7 @@ returns, errors, and relevant scientific interpretation.
 |---|---|
 | `add_human_gene_name` | Maps mouse DE genes to one or more human orthologues and records whether each result came from the orthologue table or an uppercase-symbol fallback. |
 | `assign_mhcii_single_signature` | Calculates a deterministic positive MHCII signature score and labels score/detection-discordant cells as `Ambiguous`. This is exploratory, not the final two-state AM definition. Processed `X` is the default scoring matrix; raw counts are used for direct core-gene detection when available. |
+| `assign_balanced_mhcii_score_groups` | Selects equal-sized high- and low-score AM tails within each core (or another declared grouping unit), leaves the middle as ambiguous, and returns group and cutoff audit tables. These are relative score groups rather than inferred biological clusters. |
 
 ### Cohort and abundance plots
 
@@ -91,6 +92,17 @@ returns, errors, and relevant scientific interpretation.
 |---|---|
 | `plot_metadata_summary` | Creates a macaron-style cohort overview and returns unique core, donor, consistency, tissue, and TMA summary tables. |
 | `plot_macrophage_pct_by_tissue` | Plots donor-level macrophage abundance by tissue after averaging multiple cores per donor/tissue; performs paired Wilcoxon tests and Benjamini–Hochberg correction. |
+| `plot_am_at2_pct_by_donor` | Calculates the percentage of all cells that are AM or AT2 in each core and plots core-level values grouped by donor and colored by tissue. |
+
+### Spatial neighborhood analysis
+
+| Function | Description |
+|---|---|
+| `test_continuous_mhcii_at2_proximity` | Relates the continuous AM MHCII-high score to nearest-AT2 distance within each core, evaluates a within-core permutation null, aggregates correlations within donor, and performs tissue-level donor tests. |
+| `calculate_nhood_enrichment_by_core` | Runs Squidpy radius-graph neighborhood enrichment separately in each core and returns focus-to-neighbor enrichment z-scores and counts; Squidpy is required only when this function is called. |
+| `summarize_nhood_by_donor` | Summarizes core-level neighborhood enrichment within donor, tissue, radius, and neighbor type. Mean/median z-scores are descriptive rather than a formal meta-analysis. |
+| `calculate_knn_niche_continuum` | Quantifies each AM's k-nearest-neighbor composition within core, calculates within-core score correlations, combines core correlations within donor using Fisher z, and tests donor correlations by tissue. |
+| `calculate_radius_niche_continuum` | Quantifies fixed-radius neighbor count, fraction, density, or presence around each AM within core and performs core-, donor-, and tissue-level correlation summaries. |
 
 ### UMAP, dotplot, and spatial figures
 
@@ -104,20 +116,8 @@ returns, errors, and relevant scientific interpretation.
 | `plot_spatial_celltypes` | Facets intact cores and maps all published cell types with an explicit legend. |
 | `plot_spatial_focus` | Facets intact cores and highlights Macrophages, AT1, and AT2 with an explicit legend. |
 | `plot_spatial_programs` | Maps macrophage identity-program scores within intact cores without mixing coordinate systems. |
+| `plot_am_at2_spatial` | Maps selected MHCII AM groups or continuous AM scores together with AT2 cells inside one core. |
+| `plot_nhood_enrichment_donor_tissue` | Produces donor-wise and tissue-summary plots for neighborhood-enrichment z-scores. |
+| `plot_radius_core_correlations` | Plots core-level score-versus-radius-neighborhood correlations, colored by tissue, with median summaries. |
+| `plot_knn_niche_continuum` | Plots tissue-stratified donor-level k-nearest-neighbor continuum correlations and FDR significance labels. |
 | `save_figure` | Saves a figure as matching PNG and PDF files. |
-
-## Reusable palettes
-
-The source module stores these version-controlled palettes:
-
-- `CELLTYPE_PALETTE`: published lung cell types;
-- `FOCUS_PALETTE`: Macrophages, AT1, and AT2;
-- `TISSUE_PALETTE`: alveolar, bronchial, vascular, and unannotated cores;
-- `SEX_PALETTE`: donor sex colors;
-- `TMA_PALETTE`: tissue-microarray colors;
-- `MACROPHAGE_SUBTYPE_PALETTE`: AM, AM-like, LYVE1+ IM, and MMP2+ IM;
-- `PROGRAM_CMAP`: diverging macrophage-program scores;
-- `EXPRESSION_CMAP`: marker-expression dotplots.
-
-The full analysis rationale, statistical plan, and change history are maintained
-in `XENIUM_AM_AT2_ANALYSIS_PROPOSAL.md`.

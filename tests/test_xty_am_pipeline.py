@@ -241,6 +241,17 @@ def test_public_functions_have_detailed_numpy_docstrings():
         pipeline.assign_mhcii_single_signature,
         pipeline.plot_metadata_summary,
         pipeline.plot_macrophage_pct_by_tissue,
+        pipeline.plot_am_at2_pct_by_donor,
+        pipeline.plot_am_at2_spatial,
+        pipeline.test_continuous_mhcii_at2_proximity,
+        pipeline.calculate_nhood_enrichment_by_core,
+        pipeline.summarize_nhood_by_donor,
+        pipeline.plot_nhood_enrichment_donor_tissue,
+        pipeline.assign_balanced_mhcii_score_groups,
+        pipeline.calculate_knn_niche_continuum,
+        pipeline.calculate_radius_niche_continuum,
+        pipeline.plot_radius_core_correlations,
+        pipeline.plot_knn_niche_continuum,
     ]
 
     for function in public_functions:
