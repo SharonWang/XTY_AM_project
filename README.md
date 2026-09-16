@@ -1,221 +1,123 @@
-# Human Lung Xenium AM AT2 Analysis
+# Human lung Xenium AM–AT2 analysis
 
-This repository contains a reproducible Python pipeline for validating human
-lung Xenium cell annotations and studying alveolar macrophage heterogeneity,
-spatial organization, and relationships with alveolar type 2 epithelial cells.
+## Dataset and paper
 
-The deposited source label **Macrophages** is a broad candidate pool, not an
-automatic alveolar-macrophage definition. Interstitial-macrophage and
-monocyte-like evidence must be reviewed first. Cycling AMs are outside scope.
+This repository analyses the human lung Xenium dataset accompanying:
 
-## Current status
+> Xu et al. *Cellular hallmarks and aging clock of the human lung
+> parenchyma*. Nature Communications (2026). PMID: 42457688.
 
-Notebook 00 provides the complete deposited UMAP, focused macrophage/AT1/AT2
-views, donor-balanced marker statistics, competing macrophage evidence scores,
-and complete-core spatial maps. It does not assign final AM or MHCII states.
+The deposited master object contains 332,063 segmented cells, 389 measured
+genes, 22 donors, and 70 tissue cores. It includes expression values, cell
+metadata, published cell-type labels, UMAP coordinates, and spatial centroid
+coordinates. The published `Macrophages` label is treated as a broad
+macrophage candidate pool, not as an automatic alveolar-macrophage definition.
+AT1, AT2, alveolar-macrophage, interstitial-macrophage, and monocyte marker
+evidence must be checked before MHCII AM subtyping.
 
-## Repository structure
+Important metadata fields are:
 
-~~~text
-XTY_AM_project/
-├── README.md
-├── scripts/
-│   └── xty_am_pipeline.py
-├── notebooks/
-│   └── 00_methodology_data_audit.ipynb
-├── tests/
-│   ├── test_xty_am_pipeline.py
-│   └── test_notebook_00_contract.py
-├── outputs/local_test/
-└── XENIUM_AM_AT2_ANALYSIS_PROPOSAL.md
-~~~
+- `donor_id`: biological donor and primary replication unit;
+- `core_id`: one spatially independent tissue core;
+- `tma_id`: tissue-microarray identifier;
+- `tissue_annotation`: anatomical annotation (`A`, `B`, `V`, or `None` in
+  the deposited object);
+- `celltype_final`: published source cell-type label;
+- `X_umap`: deposited two-dimensional UMAP coordinates;
+- `spatial`: cell-centroid coordinates, interpreted only within a core.
 
-The project uses one reusable source script:
-**scripts/xty_am_pipeline.py**. The Jupyter notebook is the step-wise execution
-and review layer and imports functions from that script.
+Data locations:
 
-## Execution modes
-
-- **local_test**: expression-heavy steps use four complete alveolar cores.
-  Every cell within a selected core is retained.
-- **hpc_full**: marker summaries use all cells. Spatial display stays bounded
-  to four deterministic complete alveolar cores.
-
-Default data locations:
-
-| Mode | Data directory |
+| Environment | Xenium data directory |
 |---|---|
-| Local | D:/Xiaonan/CODEX_projects/Xiaotong_AM/Spatial/Spatial |
-| HPC | /dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/data/Spatial |
+| Local | `D:/Xiaonan/CODEX_projects/Xiaotong_AM/Spatial/Spatial` |
+| HPC | `/dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/data/Spatial` |
 
-Paths can be overridden without editing scientific code:
+The main input is `xenium.h5ad`. The complete mouse differential-expression
+table is `BD_DEgenes.csv`; Cycling AM is excluded from the MHCII-high/low AM
+question.
 
-~~~powershell
-$env:XTY_AM_RUN_MODE = "local_test"
-$env:XTY_AM_DATA_DIR = "D:/path/to/Spatial"
-$env:XTY_AM_OUTPUT_ROOT = "D:/path/to/outputs"
-jupyter lab notebooks/00_methodology_data_audit.ipynb
-~~~
+## Notebooks
 
-~~~bash
-export XTY_AM_RUN_MODE=hpc_full
-export XTY_AM_DATA_DIR=/dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/data/Spatial
-export XTY_AM_OUTPUT_ROOT=/dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/analysis_v1/outputs/hpc_full
-jupyter lab notebooks/00_methodology_data_audit.ipynb
-~~~
+All notebooks are stored in `notebooks/`. They are the step-wise scientific
+record; reusable calculations and plotting implementations live in the single
+source module described below.
 
-## Python dependencies
-
-Python 3.12 with anndata, h5py, numpy, pandas, scipy, matplotlib, seaborn,
-nbformat, nbclient, ipykernel, and pytest.
-
-## Function catalogue
-
-All public functions have NumPy-style docstrings describing inputs, outputs,
-assumptions, and errors.
-
-### Validation and selection
-
-| Function | Purpose | Main output |
+| Notebook | Status | Description |
 |---|---|---|
-| **validate_xenium_metadata** | Verifies metadata, cell identifiers, UMAP, and spatial coordinates. | Audit dictionary |
-| **select_representative_cores** | Selects complete alveolar cores across the core-size distribution. | Core IDs and summary |
-| **marker_availability_table** | Separates measured markers from genes absent from the panel. | Availability outputs |
-| **extract_marker_matrices** | Aligns transformed and raw values in explicit gene order and validates zero patterns. | Two matrices and concordance |
+| `notebooks/00_methodology_data_audit.ipynb` | Implemented and locally executed | Audits the H5AD schema and metadata; displays the complete deposited UMAP; checks macrophage, AT1, and AT2 marker evidence; calculates donor-balanced marker summaries; and maps source labels and macrophage identity evidence in intact tissue cores. It does not finalize AM membership or MHCII states. |
+| `notebooks/01_mouse_MHCII_signature_mapping.ipynb` | Planned | Audits the complete mouse DE table, excludes Cycling AM, maps mouse genes to human orthologues, and records Xenium-panel signature coverage. |
+| `notebooks/02_human_AM_MHCII_states.ipynb` | Planned | Defines the reviewed AM population and evaluates continuous and categorical MHCII-high/low state evidence across donors and cores. |
+| `notebooks/03_AM_spatial_neighborhoods.ipynb` | Planned | Tests AM-state locations, nearest cell types, AT2 distances, multi-radius neighborhoods, and within-core spatial null models. |
+| `notebooks/04_AM_AT2_communication.ipynb` | Planned | Evaluates panel-observable, spatially supported AM–AT2 ligand–receptor candidates in both directions. |
+| `notebooks/05_integrated_statistics_figures.ipynb` | Planned | Performs donor-aware models, sensitivity analyses, final statistical checks, and manuscript figure/source-data assembly. |
+| `notebooks/06_manuscript_methods_results.ipynb` | Planned | Produces reproducible Methods, Results, legends, limitations, and executed manuscript numbers. |
 
-### Marker summaries and program scores
+## Source module
 
-| Function | Purpose | Main output |
-|---|---|---|
-| **summarize_markers** | Calculates core and donor summaries, then averages donors equally. | Three summary tables |
-| **compute_program_scores** | Standardizes genes within candidate cells and averages genes into evidence programs. | Cell, core, and donor scores |
+The only reusable Python source file is `scripts/xty_am_pipeline.py`.
+Every public function has a NumPy-style docstring describing parameters,
+returns, errors, and relevant scientific interpretation.
 
-Program scores are exploratory visualization aids, not classifiers, statistical
-tests, or final AM definitions.
+### Validation, selection, and metadata transfer
 
-### Plotting and output
-
-| Function | Purpose |
+| Function | Description |
 |---|---|
-| **configure_plot_style** | Applies shared Cell-style typography and settings. |
-| **plot_full_umap** | Plots every cell in the deposited UMAP. |
-| **plot_focus_umap** | Highlights macrophage candidates, AT1, and AT2. |
-| **plot_marker_dotplot** | Shows donor-balanced expression and detection. |
-| **plot_program_umap** | Displays standardized macrophage evidence programs. |
-| **plot_spatial_celltypes** | Maps all published cell types in complete cores with an explicit palette legend. |
-| **plot_spatial_focus** | Maps macrophage candidates, AT1, and AT2 with an explicit legend. |
-| **plot_spatial_programs** | Maps macrophage evidence programs. |
-| **save_figure** | Writes matching PNG and PDF files. |
+| `validate_xenium_metadata` | Validates required observation columns, unique cell IDs, UMAP/spatial dimensions, coordinate agreement, and donor/core counts. |
+| `select_representative_cores` | Deterministically selects complete alveolar cores containing macrophage, AT1, and AT2 source labels across the core-size distribution. |
+| `merge_obs_to_main` | Transfers `.obs` columns from a subset AnnData into a main object by `obs_names`, with duplicate-ID, subset, and conflict safeguards plus a merge report. |
 
-## Marker definitions
+### Expression and marker summaries
 
-Definitions are version controlled in **MARKER_MODULES**:
-
-| Evidence | Measured markers |
+| Function | Description |
 |---|---|
-| AT1 | AGER, SCEL |
-| AT2 | SFTPD, PLA2G4F |
-| Alveolar-macrophage evidence | MARCO, APOE |
-| Interstitial-macrophage alternative | LYVE1, CD163, FCGR3A, MS4A4A |
-| Monocyte or inflammatory alternative | FCN1, S100A12, IL1B, CLEC4E |
-| Pan-macrophage support | CD68, AIF1, MPEG1, TYROBP |
+| `marker_availability_table` | Reports which declared marker genes are measured or absent from the Xenium panel. |
+| `extract_marker_matrices` | Extracts transformed and raw marker matrices using their own gene indices and verifies matching zero patterns. |
+| `summarize_markers` | Calculates core- and donor-level expression/detection summaries and an equal-weight donor summary for dotplots. |
+| `cluster_expression_summary` | Returns mean expression, percentage detected, and cell count for each requested gene and group from `X` or a named layer. |
+| `gene_detection_by_group` | Calculates raw-count gene-detection percentages by a metadata group. |
+| `compute_program_scores` | Standardizes measured genes within a candidate population and averages them into exploratory evidence programs with core/donor summaries. |
 
-Genes absent from the panel, such as FABP4, PPARG, C1QA, and SFTPC, are
-reported as unavailable rather than interpreted as zero expression.
+### Mouse-to-human mapping and MHCII annotation
+
+| Function | Description |
+|---|---|
+| `add_human_gene_name` | Maps mouse DE genes to one or more human orthologues and records whether each result came from the orthologue table or an uppercase-symbol fallback. |
+| `assign_mhcii_single_signature` | Calculates a deterministic positive MHCII signature score and labels score/detection-discordant cells as `Ambiguous`. This is exploratory, not the final two-state AM definition. Processed `X` is the default scoring matrix; raw counts are used for direct core-gene detection when available. |
+
+### Cohort and abundance plots
+
+| Function | Description |
+|---|---|
+| `plot_metadata_summary` | Creates a macaron-style cohort overview and returns unique core, donor, consistency, tissue, and TMA summary tables. |
+| `plot_macrophage_pct_by_tissue` | Plots donor-level macrophage abundance by tissue after averaging multiple cores per donor/tissue; performs paired Wilcoxon tests and Benjamini–Hochberg correction. |
+
+### UMAP, dotplot, and spatial figures
+
+| Function | Description |
+|---|---|
+| `configure_plot_style` | Applies the shared publication-style Matplotlib and Seaborn theme. |
+| `plot_full_umap` | Plots every cell in the deposited UMAP with published cell-type colors. |
+| `plot_focus_umap` | Highlights Macrophages, AT1, and AT2 over pale context cells. |
+| `plot_marker_dotplot` | Displays donor-balanced mean expression as color and raw detection as dot area. |
+| `plot_program_umap` | Maps exploratory macrophage identity-program scores on the deposited UMAP. |
+| `plot_spatial_celltypes` | Facets intact cores and maps all published cell types with an explicit legend. |
+| `plot_spatial_focus` | Facets intact cores and highlights Macrophages, AT1, and AT2 with an explicit legend. |
+| `plot_spatial_programs` | Maps macrophage identity-program scores within intact cores without mixing coordinate systems. |
+| `save_figure` | Saves a figure as matching PNG and PDF files. |
 
 ## Reusable palettes
 
-Palettes are stored in **scripts/xty_am_pipeline.py**:
+The source module stores these version-controlled palettes:
 
-- **CELLTYPE_PALETTE**: full source-cell-type palette;
-- **FOCUS_PALETTE**: macrophage, AT1, and AT2 colors;
-- **PROGRAM_CMAP**: blue-white-coral evidence-score gradient;
-- **EXPRESSION_CMAP**: pale-lavender-to-coral expression gradient;
-- **CONTEXT_GREY**: background tissue context.
+- `CELLTYPE_PALETTE`: published lung cell types;
+- `FOCUS_PALETTE`: Macrophages, AT1, and AT2;
+- `TISSUE_PALETTE`: alveolar, bronchial, vascular, and unannotated cores;
+- `SEX_PALETTE`: donor sex colors;
+- `TMA_PALETTE`: tissue-microarray colors;
+- `MACROPHAGE_SUBTYPE_PALETTE`: AM, AM-like, LYVE1+ IM, and MMP2+ IM;
+- `PROGRAM_CMAP`: diverging macrophage-program scores;
+- `EXPRESSION_CMAP`: marker-expression dotplots.
 
-New palettes must be added to the same registry and documented here.
-
-## Minimal Python example
-
-~~~python
-import anndata as ad
-import numpy as np
-
-from scripts.xty_am_pipeline import (
-    MARKER_MODULES,
-    extract_marker_matrices,
-    marker_availability_table,
-    select_representative_cores,
-    summarize_markers,
-)
-
-adata = ad.read_h5ad("xenium.h5ad", backed="r")
-selected_cores, core_summary = select_representative_cores(
-    adata.obs, n_cores=4, tissue_code="A"
-)
-availability, availability_map, genes = marker_availability_table(
-    adata.var_names
-)
-mask = adata.obs["core_id"].astype(str).isin(selected_cores).to_numpy()
-indices = np.flatnonzero(mask)
-transformed, raw, concordance = extract_marker_matrices(
-    adata, row_indices=indices, genes=genes
-)
-summary, by_core, by_donor = summarize_markers(
-    transformed,
-    raw,
-    adata.obs.iloc[indices],
-    genes=genes,
-    marker_modules=MARKER_MODULES,
-)
-~~~
-
-## Statistical rules
-
-- Donor is the biological replicate.
-- Core is a spatial field nested within donor.
-- Cells are not independent biological replicates.
-- Spatial distances and neighborhoods never cross core boundaries.
-- Local testing retains every cell in a selected core.
-- Donor-balanced summaries prevent unequal cell counts dominating results.
-- MHCII analysis starts only after the AM candidate rule is approved.
-
-## Function documentation and maintenance
-
-Whenever reusable functions are added or changed:
-
-1. Write a failing behavioral test before production code.
-2. Implement the function in **scripts/xty_am_pipeline.py**.
-3. Add a detailed Python docstring covering scientific purpose, every input,
-   every returned object, assumptions, coordinate/replicate boundaries, and
-   possible errors.
-4. Update this README function catalogue and examples.
-5. Update and execute affected notebook cells top to bottom.
-6. Update the living proposal and change log.
-7. Regenerate bounded local-test outputs.
-8. Run tests, inspect figures, commit, and push verified changes.
-
-If a procedural Python script is supplied, convert reusable logic into
-functions in the single source script. If R functions are added later, document
-them with Roxygen comments covering parameters, returns, examples, and export.
-
-## Validation
-
-~~~powershell
-python -m pytest -p no:cacheprovider -q
-~~~
-
-Tests cover function behavior, donor-balanced statistics, raw/transformed gene
-alignment, intact-core selection, plotting, docstrings, top-to-bottom notebook
-execution, and required outputs.
-
-## Outputs
-
-Bounded review outputs are stored in **outputs/local_test**:
-
-- **figures**: matching PNG and PDF files;
-- **tables**: marker availability, donor/core summaries, and scores;
-- **notebook_00_summary.json**: machine-readable execution record.
-
-Unrestricted HPC outputs remain outside Git under the configured HPC analysis
-directory.
+The full analysis rationale, statistical plan, and change history are maintained
+in `XENIUM_AM_AT2_ANALYSIS_PROPOSAL.md`.

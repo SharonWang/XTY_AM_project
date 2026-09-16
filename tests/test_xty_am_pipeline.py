@@ -234,6 +234,13 @@ def test_public_functions_have_detailed_numpy_docstrings():
         pipeline.plot_spatial_celltypes,
         pipeline.plot_spatial_focus,
         pipeline.plot_spatial_programs,
+        pipeline.cluster_expression_summary,
+        pipeline.add_human_gene_name,
+        pipeline.gene_detection_by_group,
+        pipeline.merge_obs_to_main,
+        pipeline.assign_mhcii_single_signature,
+        pipeline.plot_metadata_summary,
+        pipeline.plot_macrophage_pct_by_tissue,
     ]
 
     for function in public_functions:
