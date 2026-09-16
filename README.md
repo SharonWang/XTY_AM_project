@@ -102,8 +102,8 @@ tests, or final AM definitions.
 | **plot_focus_umap** | Highlights macrophage candidates, AT1, and AT2. |
 | **plot_marker_dotplot** | Shows donor-balanced expression and detection. |
 | **plot_program_umap** | Displays standardized macrophage evidence programs. |
-| **plot_spatial_celltypes** | Maps all published cell types in complete cores. |
-| **plot_spatial_focus** | Maps macrophage candidates, AT1, and AT2. |
+| **plot_spatial_celltypes** | Maps all published cell types in complete cores with an explicit palette legend. |
+| **plot_spatial_focus** | Maps macrophage candidates, AT1, and AT2 with an explicit legend. |
 | **plot_spatial_programs** | Maps macrophage evidence programs. |
 | **save_figure** | Writes matching PNG and PDF files. |
 

@@ -27,6 +27,21 @@ def test_notebook_has_required_reader_facing_structure():
     ]
     for heading in required_headings:
         assert heading in markdown
+    for step in ("6a", "6b", "6c", "6d", "6e", "6f"):
+        assert f"#### Step {step}" in markdown
+
+    code_sources = [
+        cell.source for cell in notebook.cells if cell.cell_type == "code"
+    ]
+    for step in ("6a", "6b", "6c", "6d", "6e", "6f"):
+        matching_cells = [
+            source for source in code_sources if f"Step {step}:" in source
+        ]
+        assert len(matching_cells) == 1, step
+    analysis_cells = [
+        source for source in code_sources if "# Step 6" in source
+    ]
+    assert len(analysis_cells) == 6
 
     parameter_cells = [
         cell

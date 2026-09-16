@@ -15,6 +15,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
 from matplotlib.figure import Figure
+from matplotlib.lines import Line2D
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -909,6 +910,27 @@ def plot_spatial_celltypes(
         axis.spines[:].set_visible(False)
     for axis in axes.flat[len(core_ids):]:
         axis.set_visible(False)
+    selected_core_mask = np.isin(core_labels, np.asarray(core_ids, dtype=str))
+    present_labels = set(celltypes[selected_core_mask])
+    legend_order = [label for label in palette if label in present_labels]
+    legend_order.extend(sorted(present_labels.difference(legend_order)))
+    handles = [
+        Line2D(
+            [], [], marker="o", linestyle="", markersize=5,
+            markerfacecolor=palette.get(label, "#BDBDBD"),
+            markeredgecolor="none", label=label,
+        )
+        for label in legend_order
+    ]
+    figure.legend(
+        handles=handles,
+        loc="center right",
+        bbox_to_anchor=(0.995, 0.5),
+        frameon=False,
+        title="Published cell type",
+        fontsize=8,
+        title_fontsize=9,
+    )
     figure.suptitle(title, x=0.01, ha="left", fontsize=16, weight="bold")
     return figure
 
@@ -980,6 +1002,22 @@ def plot_spatial_focus(
         axis.spines[:].set_visible(False)
     for axis in axes.flat[len(core_ids):]:
         axis.set_visible(False)
+    handles = [
+        Line2D(
+            [], [], marker="o", linestyle="", markersize=6,
+            markerfacecolor=focus_palette[label], markeredgecolor="none",
+            label=label,
+        )
+        for label in focus_labels
+    ]
+    figure.legend(
+        handles=handles,
+        loc="upper center",
+        bbox_to_anchor=(0.5, 0.975),
+        ncol=len(handles),
+        frameon=False,
+        title="Source label",
+    )
     figure.suptitle(title, x=0.01, ha="left", fontsize=16, weight="bold")
     return figure
 

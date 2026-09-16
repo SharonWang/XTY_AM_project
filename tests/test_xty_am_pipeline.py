@@ -184,6 +184,11 @@ def test_specialized_plot_helpers_return_expected_facets():
         obs,
         core_ids=("c1", "c2"),
     )
+    spatial_celltypes = pipeline.plot_spatial_celltypes(
+        coordinates,
+        obs,
+        core_ids=("c1", "c2"),
+    )
     spatial_program = pipeline.plot_spatial_programs(
         coordinates,
         obs,
@@ -195,8 +200,21 @@ def test_specialized_plot_helpers_return_expected_facets():
     assert len(focus_umap.axes) == 1
     assert len(program_umap.axes) >= 2
     assert len(spatial_focus.axes) == 2
+    assert len(spatial_celltypes.axes) == 2
     assert len(spatial_program.axes) >= 4
-    for figure in (focus_umap, program_umap, spatial_focus, spatial_program):
+    focus_legend = {text.get_text() for text in spatial_focus.legends[0].texts}
+    celltype_legend = {
+        text.get_text() for text in spatial_celltypes.legends[0].texts
+    }
+    assert focus_legend == {"Macrophages", "AT1", "AT2"}
+    assert celltype_legend == {"Macrophages", "AT1", "AT2", "B"}
+    for figure in (
+        focus_umap,
+        program_umap,
+        spatial_celltypes,
+        spatial_focus,
+        spatial_program,
+    ):
         plt.close(figure)
 
 
