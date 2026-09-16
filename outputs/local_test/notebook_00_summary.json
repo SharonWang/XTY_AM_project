@@ -36,9 +36,10 @@
   "expression_semantics": {
     "X": "non-negative transformed/log-normalized expression",
     "raw.X": "non-negative integer-like transcript counts",
-    "dotplot_color": "mean X across all cells in group",
-    "dotplot_size": "fraction raw.X > 0"
+    "dotplot_color": "equal-weight donor mean of within-donor mean X",
+    "dotplot_size": "equal-weight donor mean of within-donor fraction raw.X > 0"
   },
+  "pipeline_source_script": "scripts/xty_am_pipeline.py",
   "expression_zero_pattern_concordance": 1.0,
   "umap_cells_plotted": 332063,
   "spatial_display_strategy": "four_representative_complete_alveolar_cores",

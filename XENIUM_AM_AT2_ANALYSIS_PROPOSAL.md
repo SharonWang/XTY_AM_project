@@ -4,10 +4,10 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 0.6
-**Status:** Notebook 00 implemented and locally validated; awaiting scientific review of annotation evidence
+**Version:** 0.7
+**Status:** Notebook 00 and its reusable Python pipeline are implemented and locally validated; awaiting scientific review of annotation evidence
 **Created:** 2026-09-12
-**Last updated:** 2026-09-13
+**Last updated:** 2026-09-16
 
 ## Document control
 
@@ -311,7 +311,7 @@ Report these as **putative spatially supported ligand-receptor interactions**. C
 
 ## Notebook architecture
 
-All analytical work will be performed in clearly commented Jupyter notebooks. Python is primary because the source is AnnData/H5AD and the spatial operations use SciPy/Scanpy-compatible structures. A dedicated R notebook may be used where `glmmTMB`, `lme4`, or another validated mixed-model implementation is preferable. Standalone analysis scripts will not be the scientific source of truth.
+All analytical work will be performed in clearly commented Jupyter notebooks. Python is primary because the source is AnnData/H5AD and the spatial operations use SciPy/Scanpy-compatible structures. A dedicated R notebook may be used where `glmmTMB`, `lme4`, or another validated mixed-model implementation is preferable. The notebooks remain the inspectable scientific record, while reusable Python logic, plot styles, and palettes are maintained in the single documented module `scripts/xty_am_pipeline.py`. Notebook cells must call these functions rather than maintain duplicate implementations.
 
 Each notebook must follow this visible sequence:
 
@@ -348,6 +348,8 @@ XTY_AM_project/
 |-- .gitignore
 |-- config/
 |   `-- analysis_config.yaml
+|-- scripts/
+|   `-- xty_am_pipeline.py
 |-- notebooks/
 |   |-- 00_methodology_data_audit.ipynb
 |   |-- 01_mouse_MHCII_signature_mapping.ipynb
@@ -367,6 +369,7 @@ XTY_AM_project/
 |   |-- hpc_full/
 |   `-- manuscript_ready/
 |-- logs/
+|-- tests/
 `-- docs/
 ```
 
@@ -447,3 +450,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 0.4 | 2026-09-12 | Executive summary; dataset interpretation; cohorts; Phase 2; notebook 00; risks; decision gates | Clarified that the published `Macrophages` label is only a candidate pool. Added explicit AM-versus-interstitial-macrophage/monocyte validation using measured positive and negative marker evidence plus spatial context, with a review gate before MHCII subtyping. | Prevents interstitial macrophages from being silently analyzed or reported as alveolar macrophages while retaining activated MHCII-high AMs for review. |
 | 0.5 | 2026-09-12 | Status; notebook 00 implementation; validation | Implemented the first executable notebook with the deposited UMAP, focused macrophage/AT1/AT2 UMAP, marker dotplot, competing AM/IM/monocyte evidence scores, and complete-core spatial maps. Local testing uses four deterministic intact alveolar cores for expression-heavy steps. Corrected backed raw-count marker extraction to use explicit raw-variable indices and added an exact zero-pattern concordance assertion between transformed and raw matrices. | Makes annotation review immediately reproducible while preventing gene-column misalignment from corrupting detection fractions. No AM inclusion rule or MHCII state is finalized. |
 | 0.6 | 2026-09-13 | Notebook 00 UMAP, HPC display, descriptive summaries, validation tests | Independent review identified and corrected three issues: the overview now plots all 332,063 cells rather than a stratified subset; both local and HPC modes use four deterministic complete alveolar cores for bounded spatial display while HPC marker calculations use all cells; and marker dotplots now average donor-level summaries equally. Added donor/core marker tables, donor/core macrophage-program summaries, stronger marker/HPC/display contracts, and clearer plot-title spacing. | Meets the full-UMAP requirement, prevents unbounded 70-core HPC figures, and removes unequal-cell-count donor dominance from descriptive marker summaries. |
+| 0.7 | 2026-09-16 | Status; notebook architecture; Git structure; validation and documentation | Added one reusable, fully documented Python module at `scripts/xty_am_pipeline.py`; moved Notebook 00 validation, marker extraction and summaries, program scoring, plotting, figure saving, palettes, and marker definitions into public functions; updated Notebook 00 to call the shared module; added unit and notebook-contract tests; and created a user-facing `README.md` function catalogue with local/HPC examples and maintenance rules. | Removes duplicated notebook implementation while preserving step-wise inspectability, makes the plotting palette reusable, and gives future notebooks a tested API with explicit inputs and outputs. |

@@ -43,7 +43,8 @@ def execute_local_notebook():
         notebook,
         timeout=1800,
         kernel_name="python3",
-        resources={"metadata": {"path": str(REPO_ROOT)}},
+        # Match JupyterLab's usual execution context: the notebook directory.
+        resources={"metadata": {"path": str(NOTEBOOK_PATH.parent)}},
     )
     client.execute()
     summary_path = (
@@ -69,6 +70,7 @@ def test_local_notebook_executes_and_writes_validated_summary(
     assert len(summary["selected_cores"]) == 4
     assert summary["spatial_display_strategy"] == "four_representative_complete_alveolar_cores"
     assert summary["expression_zero_pattern_concordance"] > 0.999
+    assert summary["pipeline_source_script"] == "scripts/xty_am_pipeline.py"
 
     expected_figures = [
         "umap_all_celltypes",
