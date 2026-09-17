@@ -4,8 +4,8 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 1.0
-**Status:** Notebook 00 and reusable Stage 1 multitype spatial functions are implemented and locally validated; awaiting scientific review of annotation evidence
+**Version:** 1.1
+**Status:** Notebook 00, Stage 1 multitype screening/plots, and Stage 2 AM MHCII–AT2 core and donor functions are implemented and locally validated; awaiting scientific review of annotation evidence
 **Created:** 2026-09-12
 **Last updated:** 2026-09-17
 
@@ -270,6 +270,22 @@ averaged across cores within each donor and tissue; tissue-level signed-rank
 tests then use donors as replicates and correct across target cell types within
 each focal type, method, scale, and tissue.
 
+Stage 2 tests the AM MHCII score against AT2 context in three complementary
+ways: continuous score versus AT2 fraction among k nearest cells, continuous
+score versus AT2 fraction inside fixed radii, and continuous score versus
+nearest-AT2 proximity. All reported signs are oriented so a positive effect
+means greater AT2 association for higher-score AMs. Equal-sized top/bottom score
+tails provide a sensitivity contrast but are not treated as inferred discrete
+subtypes. If an AM has no measured cell within a requested radius, it is
+excluded from that radius-specific effect rather than assigned AT2 fraction
+zero. Ambiguous tied high/low cutoff boundaries are not split arbitrarily.
+
+Stage 2 score or tail labels are permuted only within spatial core. These
+core-level permutation P values and FDR values are diagnostic. Final tissue
+inference averages cores within donor and uses one donor effect per tissue in a
+one-sided Wilcoxon signed-rank test, followed by Benjamini-Hochberg correction
+within method, effect type, scale, and tissue.
+
 ### Phase 6 - AM-AT2 communication potential
 
 1. Import a versioned human ligand-receptor resource and intersect both genes with the panel.
@@ -310,6 +326,8 @@ Report these as **putative spatially supported ligand-receptor interactions**. C
 - Targeted-panel expression is summarized with detection prevalence and nonzero expression.
 - Models, transformations, thresholds, and contrasts are fixed before final testing.
 - Exploratory and confirmatory results are clearly separated.
+- Signed Stage 2 correlations and high-minus-low differences are summarized on
+  their native signed scale; ratio or log-ratio transformations are not applied.
 
 ## Technical acceptance criteria
 
@@ -450,6 +468,9 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | Multitype label permutations erase native cell-type compartment structure | Interpret Stage 1 effects as enrichment relative to random mixing conditional on cell counts; confirm headline associations with density/boundary sensitivities and a spatially constrained null. |
 | Removing ambiguous or excluded cells changes neighborhood geometry | Retain excluded labels as spatial background while omitting them only from focal/target hypothesis families. |
 | Small donor strata have coarse signed-rank P values | Report effect distributions and donor counts; regard tests with fewer than five donors as exploratory and require leave-one-donor-out directional stability. |
+| Empty fixed-radius neighborhoods are encoded as zero AT2 exposure | Exclude AMs with no measured neighbor at that radius, report analyzed and excluded counts, and repeat across radii. |
+| Tied MHCII scores are split arbitrarily at balanced-tail cutoffs | Omit core/radius contrasts whose low or high boundary cuts through a tie; retain the continuous-score analysis as primary. |
+| Core-level Stage 2 permutation P values are mistaken for donor replication | Label core P values/FDR as diagnostics and base final tissue inference on one aggregated effect per donor. |
 
 ## Decision gates before implementation
 
@@ -475,3 +496,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 0.8 | 2026-09-16 | Reusable functions; palettes; README scope; validation | Consolidated the user-supplied cohort, tissue-abundance, MHCII scoring, `.obs` merge, expression-summary, detection, and mouse-human orthologue utilities into the single Python source module. Added reusable tissue, sex, TMA, and macrophage-subtype palettes; replaced notebook-only display behavior and unavailable Scanpy/statsmodels dependencies with tested NumPy/SciPy implementations; and narrowed `README.md` to dataset metadata, notebook locations/descriptions, and the source-function catalogue. | Makes the supplied code reusable and locally testable without adding source files or undeclared dependencies, while keeping the README focused on dataset and analysis navigation. |
 | 0.9 | 2026-09-16 | Spatial methods; MHCII sensitivity groups; plotting; source API; README; validation risks | Added the supplied AM/AT2 abundance and spatial plots, continuous nearest-AT2 test, per-core Squidpy neighborhood enrichment, donor summarization, balanced score-tail assignment, k-nearest-neighbor and fixed-radius niche-continuum analyses, and their plotting functions to the single Python module. Preserved the supplied plotting behavior, documented every public input/output, added small two-core local regression tests, deferred Squidpy loading, and exposed the new API in `__all__` and the README. Added explicit cautions that balanced tails are relative groups, enrichment-z averaging is descriptive, and very small donor Wilcoxon tests are exploratory. | Makes the HPC-validated spatial workflow reusable and locally smoke-testable while separating descriptive outputs and sensitivity labels from donor-level biological inference. |
 | 1.0 | 2026-09-17 | Phase 4-5 spatial methods; statistical principles; risks; source API; README; validation | Added the multitype Stage 1 contact, k-nearest-neighbor, fixed-radius, nearest-distance, and donor/tissue summary functions. Preserved the existing Squidpy neighborhood function, deduplicated symmetric contact hypotheses, retained excluded labels as spatial background, enforced one donor/tissue per core and valid parameters, and added small synthetic-core regression tests. | Provides a transparent discovery screen across cell types while keeping donor-level replication, null-model limitations, and confirmatory requirements explicit. |
+| 1.1 | 2026-09-17 | Status; Phase 5; statistical principles; risks; source API; README; validation | Added the supplied Stage 1A/1B donor-level plots, a metadata-only reproducible multicore runner, and Stage 2 balanced-tail, continuous kNN/radius, nearest-AT2, and donor/tissue summary functions. Excluded empty radius neighborhoods rather than treating them as zero AT2 exposure, omitted ambiguous tied tail boundaries, and used native signed permutation summaries rather than invalid ratio transformations. | Provides an HPC-ready, donor-aware test of whether higher MHCII-score alveolar macrophages show greater AT2 association while keeping categorical tails secondary and core P values diagnostic. |
