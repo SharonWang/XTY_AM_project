@@ -190,3 +190,151 @@ def test_multitype_stage1_public_functions_have_numpy_docstrings():
         docstring = function.__doc__ or ""
         assert "Parameters" in docstring, function.__name__
         assert "Returns" in docstring, function.__name__
+
+
+def test_local_niche_counts_do_not_overflow_above_int8_range():
+    """At least 130 target neighbors must remain 130 rather than wrap at 127."""
+    n_targets = 130
+    obs = pd.DataFrame(
+        {
+            "CellType_refined": ["AM"] + ["AT2"] * n_targets,
+            "core_id": ["C1"] * (n_targets + 1),
+            "donor_id": ["D1"] * (n_targets + 1),
+            "tissue_annotation": ["A"] * (n_targets + 1),
+        },
+        index=[f"dense_{index}" for index in range(n_targets + 1)],
+    )
+    adata = ad.AnnData(
+        X=np.zeros((n_targets + 1, 1)),
+        obs=obs,
+        var=pd.DataFrame(index=["G1"]),
+    )
+    angles = np.linspace(0, 2 * np.pi, n_targets, endpoint=False)
+    adata.obsm["spatial"] = np.vstack(
+        [[0.0, 0.0], np.column_stack([np.cos(angles), np.sin(angles)])]
+    )
+
+    result = pipeline.calculate_multitype_knn_niche_by_core(
+        adata,
+        k_values=(130,),
+        focal_types=("AM",),
+        target_types=("AT2",),
+        min_focal_cells=1,
+        min_target_cells=1,
+        n_permutations=3,
+    )
+    row = result.iloc[0]
+    assert row["mean_target_neighbors"] == pytest.approx(130.0)
+    assert row["observed"] == pytest.approx(1.0)
+
+
+def test_excluded_celltypes_cannot_be_focal_or_target_hypotheses():
+    """Background-only labels must never re-enter an explicit test request."""
+    adata = _stage1_adata()
+    results = [
+        pipeline.calculate_multitype_nhood_enrichment_by_core(
+            adata,
+            focal_types=("Unknown",),
+            target_types=("AT2",),
+            radii=(3,),
+            min_focal_cells=1,
+            min_target_cells=1,
+            n_permutations=3,
+        ),
+        pipeline.calculate_multitype_knn_niche_by_core(
+            adata,
+            k_values=(1,),
+            focal_types=("Unknown",),
+            target_types=("AT2",),
+            min_focal_cells=1,
+            min_target_cells=1,
+            n_permutations=3,
+        ),
+        pipeline.calculate_multitype_nearest_distance_by_core(
+            adata,
+            focal_types=("Unknown",),
+            target_types=("AT2",),
+            min_focal_cells=1,
+            min_target_cells=1,
+            n_permutations=3,
+        ),
+    ]
+    for result in results:
+        assert result.empty
+        assert {"focal_type", "target_type", "effect"}.issubset(result.columns)
+
+
+def test_contact_results_and_fdr_are_invariant_to_focal_order():
+    """Reordering focal labels must not change undirected tests or FDR values."""
+    kwargs = {
+        "adata": _stage1_adata(),
+        "target_types": ("AM", "AT2", "Fibroblast"),
+        "radii": (3,),
+        "min_focal_cells": 1,
+        "min_target_cells": 1,
+        "n_permutations": 19,
+        "random_state": 7,
+    }
+    forward = pipeline.calculate_multitype_nhood_enrichment_by_core(
+        focal_types=("AM", "AT2"),
+        **kwargs,
+    )
+    reversed_order = pipeline.calculate_multitype_nhood_enrichment_by_core(
+        focal_types=("AT2", "AM"),
+        **kwargs,
+    )
+    columns = [
+        "core_id", "focal_type", "target_type", "p_association",
+        "FDR_within_core",
+    ]
+    sort_columns = ["core_id", "focal_type", "target_type"]
+    pd.testing.assert_frame_equal(
+        forward[columns].sort_values(sort_columns).reset_index(drop=True),
+        reversed_order[columns].sort_values(sort_columns).reset_index(drop=True),
+    )
+
+
+@pytest.mark.parametrize("metadata_failure", ["absent", "all_missing", "partial"])
+def test_stage1_requires_complete_one_to_one_core_metadata(metadata_failure):
+    """Every analyzed core must map completely to exactly one donor and tissue."""
+    adata = _stage1_adata()
+    if metadata_failure == "absent":
+        del adata.obs["donor_id"]
+    elif metadata_failure == "all_missing":
+        adata.obs.loc[adata.obs["core_id"].eq("C1"), "donor_id"] = pd.NA
+    else:
+        adata.obs.loc["cell_1", "tissue_annotation"] = pd.NA
+
+    with pytest.raises((KeyError, ValueError), match="donor|tissue"):
+        pipeline.calculate_multitype_nhood_enrichment_by_core(
+            adata,
+            radii=(3,),
+            min_focal_cells=1,
+            min_target_cells=1,
+            n_permutations=3,
+        )
+
+
+def test_empty_stage1_outputs_keep_schema_and_can_be_summarized():
+    """No eligible cores must return an empty but composable result table."""
+    empty = pipeline.calculate_multitype_radius_niche_by_core(
+        _stage1_adata(),
+        radii=(2,),
+        focal_types=("AM",),
+        target_types=("AT2",),
+        min_focal_cells=100,
+        min_target_cells=100,
+        n_permutations=3,
+    )
+    required = {
+        "method", "direction", "focal_type", "target_type", "core_id",
+        "donor_id", "tissue_annotation", "effect", "zscore", "n_focal",
+        "n_target", "FDR_within_core",
+    }
+    assert empty.empty
+    assert required.issubset(empty.columns)
+    donor_summary, tissue_tests = pipeline.summarize_stage1_by_donor_and_tissue(
+        empty
+    )
+    assert donor_summary.empty
+    assert tissue_tests.empty

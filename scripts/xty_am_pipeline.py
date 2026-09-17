@@ -6492,6 +6492,22 @@ def plot_knn_niche_continuum(
     return fig, axes
 
 
+_STAGE1_BASE_COLUMNS = (
+    "method", "direction", "focal_type", "target_type", "scale_type",
+    "scale", "core_id", "donor_id", "tissue_annotation", "n_cells",
+    "n_focal", "n_target", "observed", "metric", "null_mean", "null_sd",
+    "zscore", "effect", "p_association", "p_two_sided",
+)
+_STAGE1_CONTACT_COLUMNS = _STAGE1_BASE_COLUMNS
+_STAGE1_NICHE_COLUMNS = _STAGE1_BASE_COLUMNS + (
+    "pct_focal_with_target", "mean_target_neighbors", "mean_total_neighbors",
+    "pct_focal_without_neighbors",
+)
+_STAGE1_DISTANCE_COLUMNS = _STAGE1_BASE_COLUMNS + (
+    "mean_distance", "median_distance", "q25_distance", "q75_distance",
+)
+
+
 def _bh_adjust(p_values):
     """Benjamini-Hochberg FDR correction."""
     p_values = np.asarray(p_values, dtype=float)
@@ -6632,7 +6648,7 @@ def _prepare_spatial_celltypes(
         Multiplier converting coordinates into micrometres.
         Use 1.0 if Xenium coordinates are already in µm.
     """
-    required = [celltype_col, core_col]
+    required = [celltype_col, core_col, donor_col, tissue_col]
 
     missing = [
         column for column in required
@@ -6688,23 +6704,16 @@ def _prepare_spatial_celltypes(
         }
     )
 
-    if donor_col in obs.columns:
-        data["donor_id"] = (
-            obs[donor_col]
-            .astype("object")
-            .to_numpy()
-        )
-    else:
-        data["donor_id"] = pd.NA
-
-    if tissue_col in obs.columns:
-        data["tissue_annotation"] = (
-            obs[tissue_col]
-            .astype("object")
-            .to_numpy()
-        )
-    else:
-        data["tissue_annotation"] = pd.NA
+    data["donor_id"] = (
+        obs[donor_col]
+        .astype("object")
+        .to_numpy()
+    )
+    data["tissue_annotation"] = (
+        obs[tissue_col]
+        .astype("object")
+        .to_numpy()
+    )
 
     if rename_celltypes is not None:
         data["celltype"] = data["celltype"].replace(
@@ -6780,8 +6789,29 @@ def _resolve_target_map(
     }
 
 
+def _eligible_focal_types(focal_types, observed_celltypes):
+    """Return unique requested focal types eligible for hypothesis testing."""
+    if isinstance(focal_types, str):
+        focal_types = [focal_types]
+    observed = set(observed_celltypes)
+    return [
+        focal
+        for focal in dict.fromkeys(focal_types)
+        if focal in observed
+    ]
+
+
 def _get_core_metadata(core_data):
     """Return donor and tissue annotation for one core."""
+    core_id = core_data["core_id"].iloc[0]
+    if core_data["donor_id"].isna().any():
+        raise ValueError(
+            f"Core {core_id!r} has missing donor annotations."
+        )
+    if core_data["tissue_annotation"].isna().any():
+        raise ValueError(
+            f"Core {core_id!r} has missing tissue annotations."
+        )
     donor_values = (
         core_data["donor_id"]
         .dropna()
@@ -6796,7 +6826,6 @@ def _get_core_metadata(core_data):
         .unique()
     )
 
-    core_id = core_data["core_id"].iloc[0]
     if len(donor_values) > 1:
         raise ValueError(
             f"Core {core_id!r} contains multiple donor annotations: "
@@ -6830,11 +6859,16 @@ def _add_within_core_fdr(results):
         return results
 
     results["FDR_within_core"] = np.nan
+    results["_fdr_focal_family"] = results["focal_type"].astype("object")
+    results.loc[
+        results["method"].eq("Contact enrichment"),
+        "_fdr_focal_family",
+    ] = "__all_undirected_contact_pairs__"
 
     group_columns = [
         "method",
         "core_id",
-        "focal_type",
+        "_fdr_focal_family",
         "scale_type",
         "scale",
     ]
@@ -6856,7 +6890,7 @@ def _add_within_core_fdr(results):
             )
         )
 
-    return results
+    return results.drop(columns="_fdr_focal_family")
 
 
 def _make_query_adjacency(
@@ -6877,7 +6911,7 @@ def _make_query_adjacency(
     if n_query == 0 or n_cells < 2:
         return csr_matrix(
             (n_query, n_cells),
-            dtype=np.int8,
+            dtype=np.int64,
         )
 
     tree = cKDTree(coordinates)
@@ -6927,7 +6961,7 @@ def _make_query_adjacency(
 
     return csr_matrix(
         (
-            np.ones(len(rows), dtype=np.int8),
+            np.ones(len(rows), dtype=np.int64),
             (
                 np.asarray(rows, dtype=int),
                 np.asarray(columns, dtype=int),
@@ -7077,6 +7111,7 @@ def calculate_multitype_nhood_enrichment_by_core(
     observed_types = sorted(
         data.loc[data["_stage1_eligible"], "celltype"].unique()
     )
+    focal_types = _eligible_focal_types(focal_types, observed_types)
 
     target_map = _resolve_target_map(
         observed_celltypes=observed_types,
@@ -7122,17 +7157,20 @@ def calculate_multitype_nhood_enrichment_by_core(
                 if unordered_pair in seen_unordered_pairs:
                     continue
                 seen_unordered_pairs.add(unordered_pair)
+                canonical_focal, canonical_target = unordered_pair
                 eligible_pairs.append(
                     (
-                        focal_type,
-                        target_type,
-                        n_focal,
-                        n_target,
+                        canonical_focal,
+                        canonical_target,
+                        int(np.sum(labels == canonical_focal)),
+                        int(np.sum(labels == canonical_target)),
                     )
                 )
 
         if not eligible_pairs:
             continue
+
+        eligible_pairs.sort(key=lambda values: (values[0], values[1]))
 
         for radius in radii:
             pairs = tree.query_pairs(
@@ -7145,6 +7183,12 @@ def calculate_multitype_nhood_enrichment_by_core(
 
             left = pairs[:, 0]
             right = pairs[:, 1]
+            permutation_indices = np.vstack(
+                [
+                    rng.permutation(len(labels))
+                    for _ in range(n_permutations)
+                ]
+            )
 
             for (
                 focal_type,
@@ -7170,7 +7214,7 @@ def calculate_multitype_nhood_enrichment_by_core(
                 )
 
                 for permutation in range(n_permutations):
-                    permuted = rng.permutation(labels)
+                    permuted = labels[permutation_indices[permutation]]
 
                     null_values[permutation] = np.sum(
                         (
@@ -7215,7 +7259,7 @@ def calculate_multitype_nhood_enrichment_by_core(
                 )
 
     return _add_within_core_fdr(
-        pd.DataFrame(records)
+        pd.DataFrame.from_records(records, columns=_STAGE1_CONTACT_COLUMNS)
     )
 
 
@@ -7280,6 +7324,7 @@ def _calculate_multitype_local_niche_by_core(
     observed_types = sorted(
         data.loc[data["_stage1_eligible"], "celltype"].unique()
     )
+    focal_types = _eligible_focal_types(focal_types, observed_types)
 
     target_map = _resolve_target_map(
         observed_celltypes=observed_types,
@@ -7345,7 +7390,7 @@ def _calculate_multitype_local_niche_by_core(
                 for target_type in target_map[focal_type]:
                     target_mask = (
                         labels == target_type
-                    ).astype(np.int8)
+                    ).astype(np.int64)
 
                     n_target = int(target_mask.sum())
 
@@ -7384,7 +7429,7 @@ def _calculate_multitype_local_niche_by_core(
 
                         permuted_target = np.zeros(
                             len(core_data),
-                            dtype=np.int8,
+                            dtype=np.int64,
                         )
                         permuted_target[selected] = 1
 
@@ -7455,7 +7500,7 @@ def _calculate_multitype_local_niche_by_core(
                     )
 
     return _add_within_core_fdr(
-        pd.DataFrame(records)
+        pd.DataFrame.from_records(records, columns=_STAGE1_NICHE_COLUMNS)
     )
 
 
@@ -7545,6 +7590,7 @@ def calculate_multitype_nearest_distance_by_core(
     observed_types = sorted(
         data.loc[data["_stage1_eligible"], "celltype"].unique()
     )
+    focal_types = _eligible_focal_types(focal_types, observed_types)
 
     target_map = _resolve_target_map(
         observed_celltypes=observed_types,
@@ -7686,7 +7732,7 @@ def calculate_multitype_nearest_distance_by_core(
                 )
 
     return _add_within_core_fdr(
-        pd.DataFrame(records)
+        pd.DataFrame.from_records(records, columns=_STAGE1_DISTANCE_COLUMNS)
     )
 
 
@@ -7873,8 +7919,15 @@ def summarize_stage1_by_donor_and_tissue(
     tissue_tests = pd.DataFrame(test_records)
     if not tissue_tests.empty:
         tissue_tests["FDR"] = np.nan
+        tissue_tests["_fdr_focal_family"] = (
+            tissue_tests["focal_type"].astype("object")
+        )
+        tissue_tests.loc[
+            tissue_tests["method"].eq("Contact enrichment"),
+            "_fdr_focal_family",
+        ] = "__all_undirected_contact_pairs__"
         fdr_groups = [
-            "method", "focal_type", "scale_type", "scale",
+            "method", "_fdr_focal_family", "scale_type", "scale",
             "tissue_annotation",
         ]
         for _, indices in tissue_tests.groupby(
@@ -7886,6 +7939,7 @@ def summarize_stage1_by_donor_and_tissue(
             tissue_tests.loc[indices, "FDR"] = _bh_adjust(
                 tissue_tests.loc[indices, "p_value"].to_numpy()
             )
+        tissue_tests = tissue_tests.drop(columns="_fdr_focal_family")
     else:
         tissue_tests = pd.DataFrame(
             columns=test_columns + [
