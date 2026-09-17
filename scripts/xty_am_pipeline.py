@@ -30,6 +30,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import sparse
+from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
 from scipy.stats import false_discovery_control, spearmanr, wilcoxon
 
@@ -6491,6 +6492,1411 @@ def plot_knn_niche_continuum(
     return fig, axes
 
 
+def _bh_adjust(p_values):
+    """Benjamini-Hochberg FDR correction."""
+    p_values = np.asarray(p_values, dtype=float)
+    adjusted = np.full(len(p_values), np.nan)
+
+    valid = np.isfinite(p_values)
+
+    if not valid.any():
+        return adjusted
+
+    p = p_values[valid]
+    n = len(p)
+
+    order = np.argsort(p)
+    ranked = p[order]
+
+    adjusted_ranked = ranked * n / np.arange(1, n + 1)
+    adjusted_ranked = np.minimum.accumulate(
+        adjusted_ranked[::-1]
+    )[::-1]
+    adjusted_ranked = np.minimum(adjusted_ranked, 1)
+
+    adjusted_valid = np.empty(n)
+    adjusted_valid[order] = adjusted_ranked
+    adjusted[valid] = adjusted_valid
+
+    return adjusted
+
+
+def _permutation_summary(
+    observed,
+    null_values,
+    smaller_is_association=False,
+    pseudocount=1e-6,
+):
+    """
+    Summarize an observed statistic against a permutation null.
+
+    The returned effect is oriented so:
+        effect > 0 = stronger association than expected.
+    """
+    null_values = np.asarray(null_values, dtype=float)
+    null_values = null_values[np.isfinite(null_values)]
+
+    if len(null_values) == 0:
+        return {
+            "null_mean": np.nan,
+            "null_sd": np.nan,
+            "zscore": np.nan,
+            "effect": np.nan,
+            "p_association": np.nan,
+            "p_two_sided": np.nan,
+        }
+
+    null_mean = float(np.mean(null_values))
+    null_sd = (
+        float(np.std(null_values, ddof=1))
+        if len(null_values) > 1
+        else np.nan
+    )
+
+    if smaller_is_association:
+        # Smaller observed distance means stronger association.
+        difference = null_mean - observed
+
+        p_association = (
+            1 + np.sum(null_values <= observed)
+        ) / (
+            len(null_values) + 1
+        )
+
+        effect = np.log2(
+            (null_mean + pseudocount) /
+            (observed + pseudocount)
+        )
+
+    else:
+        # Larger contact/fraction means stronger association.
+        difference = observed - null_mean
+
+        p_association = (
+            1 + np.sum(null_values >= observed)
+        ) / (
+            len(null_values) + 1
+        )
+
+        effect = np.log2(
+            (observed + pseudocount) /
+            (null_mean + pseudocount)
+        )
+
+    if np.isfinite(null_sd) and null_sd > 0:
+        zscore = difference / null_sd
+    else:
+        zscore = np.nan
+
+    p_two_sided = (
+        1 +
+        np.sum(
+            np.abs(null_values - null_mean) >=
+            abs(observed - null_mean)
+        )
+    ) / (
+        len(null_values) + 1
+    )
+
+    return {
+        "null_mean": null_mean,
+        "null_sd": null_sd,
+        "zscore": zscore,
+        "effect": float(effect),
+        "p_association": float(p_association),
+        "p_two_sided": float(p_two_sided),
+    }
+
+
+def _prepare_spatial_celltypes(
+    adata,
+    celltype_col="CellType_refined",
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    spatial_key="spatial",
+    coordinate_scale=1.0,
+    rename_celltypes=None,
+    exclude_celltypes=(
+        "Mixed",
+        "Ambiguous",
+        "Unknown",
+        "Doublet",
+        "Unassigned",
+    ),
+):
+    """
+    Extract spatial coordinates and cell annotations.
+
+    coordinate_scale:
+        Multiplier converting coordinates into micrometres.
+        Use 1.0 if Xenium coordinates are already in µm.
+    """
+    required = [celltype_col, core_col]
+
+    missing = [
+        column for column in required
+        if column not in adata.obs.columns
+    ]
+
+    if missing:
+        raise KeyError(
+            f"Missing adata.obs columns: {missing}"
+        )
+
+    if spatial_key not in adata.obsm:
+        raise KeyError(
+            f"{spatial_key!r} is absent from adata.obsm."
+        )
+
+    coordinates = np.asarray(
+        adata.obsm[spatial_key],
+        dtype=float,
+    )
+
+    if coordinates.ndim != 2 or coordinates.shape[1] < 2:
+        raise ValueError(
+            f"adata.obsm[{spatial_key!r}] must contain at least "
+            "two coordinate columns."
+        )
+
+    if coordinates.shape[0] != adata.n_obs:
+        raise ValueError(
+            "Spatial coordinates do not match adata.n_obs."
+        )
+
+    if not np.isfinite(coordinate_scale) or coordinate_scale <= 0:
+        raise ValueError("coordinate_scale must be finite and greater than zero.")
+
+    obs = adata.obs
+
+    data = pd.DataFrame(
+        {
+            "cell_id": obs.index.astype(str),
+            "celltype": (
+                obs[celltype_col]
+                .astype("object")
+                .to_numpy()
+            ),
+            "core_id": (
+                obs[core_col]
+                .astype("object")
+                .to_numpy()
+            ),
+            "x": coordinates[:, 0] * coordinate_scale,
+            "y": coordinates[:, 1] * coordinate_scale,
+        }
+    )
+
+    if donor_col in obs.columns:
+        data["donor_id"] = (
+            obs[donor_col]
+            .astype("object")
+            .to_numpy()
+        )
+    else:
+        data["donor_id"] = pd.NA
+
+    if tissue_col in obs.columns:
+        data["tissue_annotation"] = (
+            obs[tissue_col]
+            .astype("object")
+            .to_numpy()
+        )
+    else:
+        data["tissue_annotation"] = pd.NA
+
+    if rename_celltypes is not None:
+        data["celltype"] = data["celltype"].replace(
+            rename_celltypes
+        )
+
+    valid = (
+        data["celltype"].notna() &
+        data["core_id"].notna() &
+        np.isfinite(data["x"]) &
+        np.isfinite(data["y"])
+    )
+
+    data = data.loc[valid].copy()
+
+    data["celltype"] = data["celltype"].astype(str)
+    if exclude_celltypes is None:
+        data["_stage1_eligible"] = True
+    else:
+        data["_stage1_eligible"] = ~data["celltype"].isin(
+            set(exclude_celltypes)
+        )
+
+    return data.reset_index(drop=True)
+
+
+def _resolve_target_map(
+    observed_celltypes,
+    focal_types,
+    target_types=None,
+):
+    """
+    Resolve which targets should be evaluated for each focal type.
+
+    target_types can be:
+      - None: every other observed cell type
+      - list/tuple: same target list for every focal type
+      - dict: separate target list for each focal type
+    """
+    observed_celltypes = list(observed_celltypes)
+    observed_set = set(observed_celltypes)
+    focal_types = list(focal_types)
+
+    if target_types is None:
+        return {
+            focal: [
+                target
+                for target in observed_celltypes
+                if target != focal and target in observed_set
+            ]
+            for focal in focal_types
+        }
+
+    if isinstance(target_types, dict):
+        return {
+            focal: [
+                target
+                for target in target_types.get(focal, [])
+                if target != focal and target in observed_set
+            ]
+            for focal in focal_types
+        }
+
+    targets = list(target_types)
+
+    return {
+        focal: [
+            target
+            for target in targets
+            if target != focal and target in observed_set
+        ]
+        for focal in focal_types
+    }
+
+
+def _get_core_metadata(core_data):
+    """Return donor and tissue annotation for one core."""
+    donor_values = (
+        core_data["donor_id"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    tissue_values = (
+        core_data["tissue_annotation"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    core_id = core_data["core_id"].iloc[0]
+    if len(donor_values) > 1:
+        raise ValueError(
+            f"Core {core_id!r} contains multiple donor annotations: "
+            f"{sorted(donor_values)}"
+        )
+    if len(tissue_values) > 1:
+        raise ValueError(
+            f"Core {core_id!r} contains multiple tissue annotations: "
+            f"{sorted(tissue_values)}"
+        )
+
+    donor_id = donor_values[0] if len(donor_values) == 1 else pd.NA
+    tissue_annotation = (
+        tissue_values[0] if len(tissue_values) == 1 else pd.NA
+    )
+
+    return donor_id, tissue_annotation
+
+
+def _add_within_core_fdr(results):
+    """
+    Correct target-cell P values within each core, focal cell type,
+    method and spatial scale.
+
+    This is primarily for Stage 1A discovery.
+    """
+    results = results.copy()
+
+    if results.empty:
+        results["FDR_within_core"] = pd.Series(dtype=float)
+        return results
+
+    results["FDR_within_core"] = np.nan
+
+    group_columns = [
+        "method",
+        "core_id",
+        "focal_type",
+        "scale_type",
+        "scale",
+    ]
+
+    for _, indices in results.groupby(
+        group_columns,
+        dropna=False,
+        observed=True,
+    ).groups.items():
+
+        indices = list(indices)
+
+        results.loc[indices, "FDR_within_core"] = (
+            _bh_adjust(
+                results.loc[
+                    indices,
+                    "p_association",
+                ].to_numpy()
+            )
+        )
+
+    return results
+
+
+def _make_query_adjacency(
+    coordinates,
+    query_indices,
+    mode,
+    scale,
+):
+    """
+    Construct a query-cell × all-cell sparse adjacency matrix.
+    """
+    coordinates = np.asarray(coordinates, dtype=float)
+    query_indices = np.asarray(query_indices, dtype=int)
+
+    n_cells = len(coordinates)
+    n_query = len(query_indices)
+
+    if n_query == 0 or n_cells < 2:
+        return csr_matrix(
+            (n_query, n_cells),
+            dtype=np.int8,
+        )
+
+    tree = cKDTree(coordinates)
+
+    rows = []
+    columns = []
+
+    if mode == "knn":
+        k = min(int(scale), n_cells - 1)
+
+        _, neighbors = tree.query(
+            coordinates[query_indices],
+            k=k + 1,
+        )
+
+        if neighbors.ndim == 1:
+            neighbors = neighbors[:, None]
+
+        for row, cell_index in enumerate(query_indices):
+            selected = neighbors[row]
+            selected = selected[selected != cell_index]
+            selected = selected[:k]
+
+            rows.extend([row] * len(selected))
+            columns.extend(selected.tolist())
+
+    elif mode == "radius":
+        neighborhoods = tree.query_ball_point(
+            coordinates[query_indices],
+            r=float(scale),
+        )
+
+        for row, cell_index in enumerate(query_indices):
+            selected = [
+                index
+                for index in neighborhoods[row]
+                if index != cell_index
+            ]
+
+            rows.extend([row] * len(selected))
+            columns.extend(selected)
+
+    else:
+        raise ValueError(
+            "mode must be 'knn' or 'radius'."
+        )
+
+    return csr_matrix(
+        (
+            np.ones(len(rows), dtype=np.int8),
+            (
+                np.asarray(rows, dtype=int),
+                np.asarray(columns, dtype=int),
+            ),
+        ),
+        shape=(n_query, n_cells),
+    )
+
+
+def _validate_stage1_parameters(
+    scales,
+    scale_name,
+    mode,
+    n_permutations,
+    min_focal_cells,
+    min_target_cells,
+):
+    """Validate common multitype Stage 1 analysis parameters."""
+    if (
+        not isinstance(n_permutations, (int, np.integer))
+        or isinstance(n_permutations, bool)
+        or n_permutations < 1
+    ):
+        raise ValueError("n_permutations must be a positive integer.")
+    for name, value in (
+        ("min_focal_cells", min_focal_cells),
+        ("min_target_cells", min_target_cells),
+    ):
+        if (
+            not isinstance(value, (int, np.integer))
+            or isinstance(value, bool)
+            or value < 1
+        ):
+            raise ValueError(f"{name} must be a positive integer.")
+
+    values = list(np.atleast_1d(scales))
+    if not values:
+        raise ValueError(f"{scale_name} must contain at least one value.")
+    if mode == "knn":
+        valid = all(
+            isinstance(value, (int, np.integer))
+            and not isinstance(value, bool)
+            and value > 0
+            for value in values
+        )
+    else:
+        valid = all(
+            np.isscalar(value)
+            and np.isfinite(value)
+            and float(value) > 0
+            for value in values
+        )
+    if not valid:
+        requirement = (
+            "positive integers" if mode == "knn" else "finite positive values"
+        )
+        raise ValueError(f"{scale_name} must contain only {requirement}.")
+    return values
+
+
+def calculate_multitype_nhood_enrichment_by_core(
+    adata,
+    focal_types=("AM", "AT2"),
+    target_types=None,
+    radii=(25, 50, 100),
+    celltype_col="CellType_refined",
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    spatial_key="spatial",
+    coordinate_scale=1.0,
+    rename_celltypes=None,
+    exclude_celltypes=(
+        "Mixed",
+        "Ambiguous",
+        "Unknown",
+        "Doublet",
+        "Unassigned",
+    ),
+    min_focal_cells=10,
+    min_target_cells=10,
+    n_permutations=199,
+    random_state=123,
+):
+    """Test whether focal-target contact pairs exceed a within-core null.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Cell-level object containing annotations and spatial coordinates.
+    focal_types : sequence of str, default=("AM", "AT2")
+        Cell types whose pairwise contacts are tested.
+    target_types : sequence, mapping, or None, default=None
+        Shared targets, focal-specific targets, or every other eligible type.
+    radii : sequence of float, default=(25, 50, 100)
+        Positive contact radii in the scaled coordinate units.
+    celltype_col, core_col, donor_col, tissue_col : str
+        Observation columns defining cell type, core, donor, and tissue.
+    spatial_key : str, default="spatial"
+        ``adata.obsm`` key containing at least two coordinate columns.
+    coordinate_scale : float, default=1.0
+        Positive multiplier converting coordinates to the desired units.
+    rename_celltypes : mapping or None, default=None
+        Optional cell-type relabeling applied before analysis.
+    exclude_celltypes : sequence or None
+        Types excluded as focal/target hypotheses but retained as spatial
+        background cells when constructing neighborhoods and nulls.
+    min_focal_cells, min_target_cells : int, default=10
+        Minimum per-core counts required for a focal-target test.
+    n_permutations : int, default=199
+        Number of within-core label permutations.
+    random_state : int, default=123
+        Seed for reproducible permutations.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Core-level contact counts, null summaries, oriented log2 effects,
+        one- and two-sided permutation P values, and within-core FDR.
+
+    Notes
+    -----
+    Contact pairs are undirected, so reversed focal-target duplicates are
+    removed. The null permutes all cell-type labels across positions within
+    each core, preserving abundance but not native spatial autocorrelation.
+    """
+    radii = _validate_stage1_parameters(
+        radii,
+        "radii",
+        "radius",
+        n_permutations,
+        min_focal_cells,
+        min_target_cells,
+    )
+    data = _prepare_spatial_celltypes(
+        adata=adata,
+        celltype_col=celltype_col,
+        core_col=core_col,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        spatial_key=spatial_key,
+        coordinate_scale=coordinate_scale,
+        rename_celltypes=rename_celltypes,
+        exclude_celltypes=exclude_celltypes,
+    )
+
+    observed_types = sorted(
+        data.loc[data["_stage1_eligible"], "celltype"].unique()
+    )
+
+    target_map = _resolve_target_map(
+        observed_celltypes=observed_types,
+        focal_types=focal_types,
+        target_types=target_types,
+    )
+
+    rng = np.random.default_rng(random_state)
+    records = []
+
+    for core_id, core_data in data.groupby(
+        "core_id",
+        sort=False,
+        observed=True,
+    ):
+        core_data = core_data.reset_index(drop=True)
+
+        labels = core_data["celltype"].to_numpy()
+        coordinates = core_data[["x", "y"]].to_numpy()
+
+        donor_id, tissue_annotation = _get_core_metadata(
+            core_data
+        )
+
+        tree = cKDTree(coordinates)
+
+        eligible_pairs = []
+        seen_unordered_pairs = set()
+
+        for focal_type in focal_types:
+            n_focal = int(np.sum(labels == focal_type))
+
+            if n_focal < min_focal_cells:
+                continue
+
+            for target_type in target_map[focal_type]:
+                n_target = int(np.sum(labels == target_type))
+
+                if n_target < min_target_cells:
+                    continue
+
+                unordered_pair = tuple(sorted((focal_type, target_type)))
+                if unordered_pair in seen_unordered_pairs:
+                    continue
+                seen_unordered_pairs.add(unordered_pair)
+                eligible_pairs.append(
+                    (
+                        focal_type,
+                        target_type,
+                        n_focal,
+                        n_target,
+                    )
+                )
+
+        if not eligible_pairs:
+            continue
+
+        for radius in radii:
+            pairs = tree.query_pairs(
+                r=float(radius),
+                output_type="ndarray",
+            )
+
+            if pairs.size == 0:
+                pairs = np.empty((0, 2), dtype=int)
+
+            left = pairs[:, 0]
+            right = pairs[:, 1]
+
+            for (
+                focal_type,
+                target_type,
+                n_focal,
+                n_target,
+            ) in eligible_pairs:
+
+                observed_contacts = np.sum(
+                    (
+                        (labels[left] == focal_type) &
+                        (labels[right] == target_type)
+                    ) |
+                    (
+                        (labels[left] == target_type) &
+                        (labels[right] == focal_type)
+                    )
+                )
+
+                null_values = np.empty(
+                    n_permutations,
+                    dtype=float,
+                )
+
+                for permutation in range(n_permutations):
+                    permuted = rng.permutation(labels)
+
+                    null_values[permutation] = np.sum(
+                        (
+                            (permuted[left] == focal_type) &
+                            (permuted[right] == target_type)
+                        ) |
+                        (
+                            (permuted[left] == target_type) &
+                            (permuted[right] == focal_type)
+                        )
+                    )
+
+                summary = _permutation_summary(
+                    observed=float(observed_contacts),
+                    null_values=null_values,
+                    smaller_is_association=False,
+                    pseudocount=0.5,
+                )
+
+                records.append(
+                    {
+                        "method": "Contact enrichment",
+                        "direction": (
+                            f"{focal_type} ↔ {target_type}"
+                        ),
+                        "focal_type": focal_type,
+                        "target_type": target_type,
+                        "scale_type": "radius_um",
+                        "scale": float(radius),
+                        "core_id": core_id,
+                        "donor_id": donor_id,
+                        "tissue_annotation": tissue_annotation,
+                        "n_cells": len(core_data),
+                        "n_focal": n_focal,
+                        "n_target": n_target,
+                        "observed": float(
+                            observed_contacts
+                        ),
+                        "metric": "Focal–target contact pairs",
+                        **summary,
+                    }
+                )
+
+    return _add_within_core_fdr(
+        pd.DataFrame(records)
+    )
+
+
+
+def _calculate_multitype_local_niche_by_core(
+    adata,
+    mode,
+    scales,
+    focal_types=("AM", "AT2"),
+    target_types=None,
+    celltype_col="CellType_refined",
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    spatial_key="spatial",
+    coordinate_scale=1.0,
+    rename_celltypes=None,
+    exclude_celltypes=(
+        "Mixed",
+        "Ambiguous",
+        "Unknown",
+        "Doublet",
+        "Unassigned",
+    ),
+    min_focal_cells=10,
+    min_target_cells=10,
+    n_permutations=199,
+    random_state=123,
+):
+    """
+    Directional focal-cell neighborhood analysis.
+
+    For every focal cell, calculate the fraction of its neighborhood
+    occupied by a selected target cell type.
+
+    Null:
+        Focal positions remain fixed. Target labels are randomized
+        among non-focal cells in the same core while preserving the
+        number of target cells.
+    """
+    scale_name = "k_values" if mode == "knn" else "radii"
+    scales = _validate_stage1_parameters(
+        scales,
+        scale_name,
+        mode,
+        n_permutations,
+        min_focal_cells,
+        min_target_cells,
+    )
+    data = _prepare_spatial_celltypes(
+        adata=adata,
+        celltype_col=celltype_col,
+        core_col=core_col,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        spatial_key=spatial_key,
+        coordinate_scale=coordinate_scale,
+        rename_celltypes=rename_celltypes,
+        exclude_celltypes=exclude_celltypes,
+    )
+
+    observed_types = sorted(
+        data.loc[data["_stage1_eligible"], "celltype"].unique()
+    )
+
+    target_map = _resolve_target_map(
+        observed_celltypes=observed_types,
+        focal_types=focal_types,
+        target_types=target_types,
+    )
+
+    method_name = (
+        "kNN niche enrichment"
+        if mode == "knn"
+        else "Fixed-radius niche enrichment"
+    )
+
+    scale_type = (
+        "k_neighbors"
+        if mode == "knn"
+        else "radius_um"
+    )
+
+    rng = np.random.default_rng(random_state)
+    records = []
+
+    for core_id, core_data in data.groupby(
+        "core_id",
+        sort=False,
+        observed=True,
+    ):
+        core_data = core_data.reset_index(drop=True)
+
+        labels = core_data["celltype"].to_numpy()
+        coordinates = core_data[["x", "y"]].to_numpy()
+
+        donor_id, tissue_annotation = _get_core_metadata(
+            core_data
+        )
+
+        for focal_type in focal_types:
+            query_indices = np.flatnonzero(
+                labels == focal_type
+            )
+
+            n_focal = len(query_indices)
+
+            if n_focal < min_focal_cells:
+                continue
+
+            candidate_indices = np.flatnonzero(
+                labels != focal_type
+            )
+
+            for scale in scales:
+                adjacency = _make_query_adjacency(
+                    coordinates=coordinates,
+                    query_indices=query_indices,
+                    mode=mode,
+                    scale=scale,
+                )
+
+                total_neighbors = np.asarray(
+                    adjacency.sum(axis=1)
+                ).ravel()
+
+                for target_type in target_map[focal_type]:
+                    target_mask = (
+                        labels == target_type
+                    ).astype(np.int8)
+
+                    n_target = int(target_mask.sum())
+
+                    if n_target < min_target_cells:
+                        continue
+
+                    observed_counts = np.asarray(
+                        adjacency @ target_mask
+                    ).ravel()
+
+                    observed_fractions = np.divide(
+                        observed_counts,
+                        total_neighbors,
+                        out=np.zeros(
+                            n_focal,
+                            dtype=float,
+                        ),
+                        where=total_neighbors > 0,
+                    )
+
+                    observed = float(
+                        np.mean(observed_fractions)
+                    )
+
+                    null_values = np.empty(
+                        n_permutations,
+                        dtype=float,
+                    )
+
+                    for permutation in range(n_permutations):
+                        selected = rng.choice(
+                            candidate_indices,
+                            size=n_target,
+                            replace=False,
+                        )
+
+                        permuted_target = np.zeros(
+                            len(core_data),
+                            dtype=np.int8,
+                        )
+                        permuted_target[selected] = 1
+
+                        permuted_counts = np.asarray(
+                            adjacency @ permuted_target
+                        ).ravel()
+
+                        permuted_fractions = np.divide(
+                            permuted_counts,
+                            total_neighbors,
+                            out=np.zeros(
+                                n_focal,
+                                dtype=float,
+                            ),
+                            where=total_neighbors > 0,
+                        )
+
+                        null_values[permutation] = np.mean(
+                            permuted_fractions
+                        )
+
+                    summary = _permutation_summary(
+                        observed=observed,
+                        null_values=null_values,
+                        smaller_is_association=False,
+                    )
+
+                    records.append(
+                        {
+                            "method": method_name,
+                            "direction": (
+                                f"{focal_type} → "
+                                f"{target_type}"
+                            ),
+                            "focal_type": focal_type,
+                            "target_type": target_type,
+                            "scale_type": scale_type,
+                            "scale": float(scale),
+                            "core_id": core_id,
+                            "donor_id": donor_id,
+                            "tissue_annotation": (
+                                tissue_annotation
+                            ),
+                            "n_cells": len(core_data),
+                            "n_focal": n_focal,
+                            "n_target": n_target,
+                            "observed": observed,
+                            "metric": (
+                                "Mean target fraction "
+                                "per focal neighborhood"
+                            ),
+                            "pct_focal_with_target": (
+                                100 *
+                                np.mean(observed_counts > 0)
+                            ),
+                            "mean_target_neighbors": float(
+                                np.mean(observed_counts)
+                            ),
+                            "mean_total_neighbors": float(
+                                np.mean(total_neighbors)
+                            ),
+                            "pct_focal_without_neighbors": (
+                                100 *
+                                np.mean(total_neighbors == 0)
+                            ),
+                            **summary,
+                        }
+                    )
+
+    return _add_within_core_fdr(
+        pd.DataFrame(records)
+    )
+
+
+
+def calculate_multitype_nearest_distance_by_core(
+    adata,
+    focal_types=("AM", "AT2"),
+    target_types=None,
+    celltype_col="CellType_refined",
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    spatial_key="spatial",
+    coordinate_scale=1.0,
+    rename_celltypes=None,
+    exclude_celltypes=(
+        "Mixed",
+        "Ambiguous",
+        "Unknown",
+        "Doublet",
+        "Unassigned",
+    ),
+    min_focal_cells=10,
+    min_target_cells=10,
+    n_permutations=199,
+    random_state=123,
+):
+    """Test focal-to-target nearest distances against a within-core null.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Cell-level object containing annotations and spatial coordinates.
+    focal_types : sequence of str, default=("AM", "AT2")
+        Cell types used as directional focal populations.
+    target_types : sequence, mapping, or None, default=None
+        Shared targets, focal-specific targets, or every other eligible type.
+    celltype_col, core_col, donor_col, tissue_col : str
+        Observation columns defining cell type, core, donor, and tissue.
+    spatial_key : str, default="spatial"
+        ``adata.obsm`` key containing at least two coordinate columns.
+    coordinate_scale : float, default=1.0
+        Positive multiplier converting coordinates to the desired units.
+    rename_celltypes : mapping or None, default=None
+        Optional cell-type relabeling applied before analysis.
+    exclude_celltypes : sequence or None
+        Types excluded from focal/target hypotheses but retained as spatial
+        background cells.
+    min_focal_cells, min_target_cells : int, default=10
+        Minimum per-core counts required for a directional test.
+    n_permutations : int, default=199
+        Number of target-label randomizations within each core.
+    random_state : int, default=123
+        Seed for reproducible permutations.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Directional core-level distance summaries, null statistics, oriented
+        log2 effects, permutation P values, and within-core FDR.
+
+    Notes
+    -----
+    Positive effect means shorter distance than expected. Focal positions stay
+    fixed while target labels are sampled from non-focal cells in the core.
+    """
+    _validate_stage1_parameters(
+        (1.0,),
+        "nearest_target_scale",
+        "radius",
+        n_permutations,
+        min_focal_cells,
+        min_target_cells,
+    )
+    data = _prepare_spatial_celltypes(
+        adata=adata,
+        celltype_col=celltype_col,
+        core_col=core_col,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        spatial_key=spatial_key,
+        coordinate_scale=coordinate_scale,
+        rename_celltypes=rename_celltypes,
+        exclude_celltypes=exclude_celltypes,
+    )
+
+    observed_types = sorted(
+        data.loc[data["_stage1_eligible"], "celltype"].unique()
+    )
+
+    target_map = _resolve_target_map(
+        observed_celltypes=observed_types,
+        focal_types=focal_types,
+        target_types=target_types,
+    )
+
+    rng = np.random.default_rng(random_state)
+    records = []
+
+    for core_id, core_data in data.groupby(
+        "core_id",
+        sort=False,
+        observed=True,
+    ):
+        core_data = core_data.reset_index(drop=True)
+
+        labels = core_data["celltype"].to_numpy()
+        coordinates = core_data[["x", "y"]].to_numpy()
+
+        donor_id, tissue_annotation = _get_core_metadata(
+            core_data
+        )
+
+        for focal_type in focal_types:
+            focal_indices = np.flatnonzero(
+                labels == focal_type
+            )
+
+            n_focal = len(focal_indices)
+
+            if n_focal < min_focal_cells:
+                continue
+
+            focal_coordinates = coordinates[focal_indices]
+
+            candidate_indices = np.flatnonzero(
+                labels != focal_type
+            )
+
+            for target_type in target_map[focal_type]:
+                target_indices = np.flatnonzero(
+                    labels == target_type
+                )
+
+                n_target = len(target_indices)
+
+                if n_target < min_target_cells:
+                    continue
+
+                target_tree = cKDTree(
+                    coordinates[target_indices]
+                )
+
+                observed_distances, _ = target_tree.query(
+                    focal_coordinates,
+                    k=1,
+                )
+
+                observed = float(
+                    np.median(observed_distances)
+                )
+
+                null_values = np.empty(
+                    n_permutations,
+                    dtype=float,
+                )
+
+                for permutation in range(n_permutations):
+                    selected = rng.choice(
+                        candidate_indices,
+                        size=n_target,
+                        replace=False,
+                    )
+
+                    permuted_tree = cKDTree(
+                        coordinates[selected]
+                    )
+
+                    permuted_distances, _ = (
+                        permuted_tree.query(
+                            focal_coordinates,
+                            k=1,
+                        )
+                    )
+
+                    null_values[permutation] = np.median(
+                        permuted_distances
+                    )
+
+                summary = _permutation_summary(
+                    observed=observed,
+                    null_values=null_values,
+                    smaller_is_association=True,
+                )
+
+                records.append(
+                    {
+                        "method": "Nearest-target distance",
+                        "direction": (
+                            f"{focal_type} → {target_type}"
+                        ),
+                        "focal_type": focal_type,
+                        "target_type": target_type,
+                        "scale_type": "nearest_target",
+                        "scale": 1.0,
+                        "core_id": core_id,
+                        "donor_id": donor_id,
+                        "tissue_annotation": (
+                            tissue_annotation
+                        ),
+                        "n_cells": len(core_data),
+                        "n_focal": n_focal,
+                        "n_target": n_target,
+                        "observed": observed,
+                        "metric": (
+                            "Median nearest-target distance"
+                        ),
+                        "mean_distance": float(
+                            np.mean(observed_distances)
+                        ),
+                        "median_distance": float(
+                            np.median(observed_distances)
+                        ),
+                        "q25_distance": float(
+                            np.quantile(
+                                observed_distances,
+                                0.25,
+                            )
+                        ),
+                        "q75_distance": float(
+                            np.quantile(
+                                observed_distances,
+                                0.75,
+                            )
+                        ),
+                        **summary,
+                    }
+                )
+
+    return _add_within_core_fdr(
+        pd.DataFrame(records)
+    )
+
+
+
+def calculate_multitype_knn_niche_by_core(
+    adata,
+    k_values=(5, 15, 30),
+    **kwargs,
+):
+    """Calculate directional multitype enrichment in k-nearest niches.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Cell-level object with cell-type, core, and spatial annotations.
+    k_values : sequence of int, default=(5, 15, 30)
+        Positive numbers of non-self nearest neighbors.
+    **kwargs
+        Additional arguments forwarded to the shared multitype niche engine,
+        including focal/target types, metadata keys, minimum cell counts,
+        permutation count, and random seed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per core, focal type, target type, and k value, with observed
+        target fractions, permutation effects, P values, and within-core FDR.
+
+    Notes
+    -----
+    Query positions remain fixed while target labels are randomized among
+    non-focal cells within the same core.
+    """
+    return _calculate_multitype_local_niche_by_core(
+        adata=adata,
+        mode="knn",
+        scales=k_values,
+        **kwargs,
+    )
+
+
+def calculate_multitype_radius_niche_by_core(
+    adata,
+    radii=(25, 50, 100),
+    **kwargs,
+):
+    """Calculate directional multitype enrichment in fixed-radius niches.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        Cell-level object with cell-type, core, and spatial annotations.
+    radii : sequence of float, default=(25, 50, 100)
+        Positive physical radii in the scaled coordinate units.
+    **kwargs
+        Additional arguments forwarded to the shared multitype niche engine,
+        including focal/target types, metadata keys, minimum cell counts,
+        permutation count, and random seed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per core, focal type, target type, and radius, with observed
+        target fractions, permutation effects, P values, and within-core FDR.
+
+    Notes
+    -----
+    Focal cells with no neighbors at a radius contribute a zero target
+    fraction and are reported through pct_focal_without_neighbors.
+    """
+    return _calculate_multitype_local_niche_by_core(
+        adata=adata,
+        mode="radius",
+        scales=radii,
+        **kwargs,
+    )
+
+
+def summarize_stage1_by_donor_and_tissue(
+    core_results,
+    min_donors=3,
+):
+    """Aggregate Stage 1 core effects and test donor effects within tissue.
+
+    Parameters
+    ----------
+    core_results : pandas.DataFrame
+        Core-level output from a multitype Stage 1 spatial function. Required
+        columns identify method, direction, focal/target types, scale, core,
+        donor, tissue, effect, z-score, and focal/target cell counts.
+    min_donors : int, default=3
+        Minimum number of non-missing donor effects required to run the
+        one-sided Wilcoxon signed-rank test.
+
+    Returns
+    -------
+    donor_summary : pandas.DataFrame
+        Mean core effect and z-score for each donor, tissue, method, direction,
+        focal/target pair, and scale.
+    tissue_tests : pandas.DataFrame
+        One-sided donor-level Wilcoxon tests of positive association, with
+        Benjamini-Hochberg correction across target types within each focal
+        type, method, tissue, and spatial scale.
+
+    Notes
+    -----
+    Donors are the inferential replicates. Tests with fewer than five donors
+    are retained for transparency but have very limited exact-test resolution.
+    """
+    required_columns = {
+        "method", "direction", "focal_type", "target_type", "scale_type",
+        "scale", "core_id", "donor_id", "tissue_annotation", "effect",
+        "zscore", "n_focal", "n_target",
+    }
+    missing = required_columns.difference(core_results.columns)
+    if missing:
+        raise KeyError(
+            "core_results is missing required columns: "
+            f"{sorted(missing)}"
+        )
+    if (
+        not isinstance(min_donors, (int, np.integer))
+        or isinstance(min_donors, bool)
+        or min_donors < 1
+    ):
+        raise ValueError("min_donors must be a positive integer.")
+
+    grouping_columns = [
+        "method", "direction", "focal_type", "target_type", "scale_type",
+        "scale", "donor_id", "tissue_annotation",
+    ]
+    donor_summary = (
+        core_results
+        .groupby(grouping_columns, observed=True, dropna=False)
+        .agg(
+            donor_effect=("effect", "mean"),
+            donor_zscore=("zscore", "mean"),
+            n_cores=("core_id", "nunique"),
+            mean_n_focal=("n_focal", "mean"),
+            mean_n_target=("n_target", "mean"),
+        )
+        .reset_index()
+    )
+
+    test_columns = [
+        "method", "direction", "focal_type", "target_type", "scale_type",
+        "scale", "tissue_annotation",
+    ]
+    test_records = []
+    for keys, group in donor_summary.groupby(
+        test_columns,
+        observed=True,
+        dropna=False,
+    ):
+        values = group["donor_effect"].dropna().to_numpy(dtype=float)
+        n_donors = len(values)
+        statistic = np.nan
+        p_value = np.nan
+        if n_donors >= min_donors and np.any(values != 0):
+            result = wilcoxon(
+                values,
+                alternative="greater",
+                zero_method="wilcox",
+            )
+            statistic = float(result.statistic)
+            p_value = float(result.pvalue)
+
+        record = dict(zip(test_columns, keys))
+        record.update(
+            {
+                "n_donors": n_donors,
+                "mean_effect": (
+                    float(np.mean(values)) if n_donors else np.nan
+                ),
+                "median_effect": (
+                    float(np.median(values)) if n_donors else np.nan
+                ),
+                "wilcoxon_statistic": statistic,
+                "p_value": p_value,
+            }
+        )
+        test_records.append(record)
+
+    tissue_tests = pd.DataFrame(test_records)
+    if not tissue_tests.empty:
+        tissue_tests["FDR"] = np.nan
+        fdr_groups = [
+            "method", "focal_type", "scale_type", "scale",
+            "tissue_annotation",
+        ]
+        for _, indices in tissue_tests.groupby(
+            fdr_groups,
+            observed=True,
+            dropna=False,
+        ).groups.items():
+            indices = list(indices)
+            tissue_tests.loc[indices, "FDR"] = _bh_adjust(
+                tissue_tests.loc[indices, "p_value"].to_numpy()
+            )
+    else:
+        tissue_tests = pd.DataFrame(
+            columns=test_columns + [
+                "n_donors", "mean_effect", "median_effect",
+                "wilcoxon_statistic", "p_value", "FDR",
+            ]
+        )
+
+    return donor_summary, tissue_tests
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
@@ -6498,6 +7904,10 @@ __all__ = [
     "SEX_PALETTE", "TISSUE_PALETTE", "TMA_PALETTE",
     "add_human_gene_name", "assign_balanced_mhcii_score_groups",
     "assign_mhcii_single_signature", "calculate_knn_niche_continuum",
+    "calculate_multitype_knn_niche_by_core",
+    "calculate_multitype_nearest_distance_by_core",
+    "calculate_multitype_nhood_enrichment_by_core",
+    "calculate_multitype_radius_niche_by_core",
     "calculate_nhood_enrichment_by_core", "calculate_radius_niche_continuum",
     "cluster_expression_summary", "compute_program_scores",
     "configure_plot_style", "extract_marker_matrices",
@@ -6511,6 +7921,7 @@ __all__ = [
     "plot_spatial_celltypes",
     "plot_spatial_focus", "plot_spatial_programs", "save_figure",
     "select_representative_cores", "summarize_markers",
-    "summarize_nhood_by_donor", "test_continuous_mhcii_at2_proximity",
+    "summarize_nhood_by_donor", "summarize_stage1_by_donor_and_tissue",
+    "test_continuous_mhcii_at2_proximity",
     "validate_xenium_metadata",
 ]

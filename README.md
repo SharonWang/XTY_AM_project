@@ -100,6 +100,11 @@ returns, errors, and relevant scientific interpretation.
 |---|---|
 | `test_continuous_mhcii_at2_proximity` | Relates the continuous AM MHCII-high score to nearest-AT2 distance within each core, evaluates a within-core permutation null, aggregates correlations within donor, and performs tissue-level donor tests. |
 | `calculate_nhood_enrichment_by_core` | Runs Squidpy radius-graph neighborhood enrichment separately in each core and returns focus-to-neighbor enrichment z-scores and counts; Squidpy is required only when this function is called. |
+| `calculate_multitype_nhood_enrichment_by_core` | Tests undirected focal-target contact counts at multiple radii against within-core cell-label permutations. Symmetric pairs are deduplicated, excluded labels remain spatial background, and target hypotheses receive within-core FDR correction. |
+| `calculate_multitype_knn_niche_by_core` | Tests directional target-cell fractions among each focal cell's k nearest neighbors against within-core target-label randomization. |
+| `calculate_multitype_radius_niche_by_core` | Tests directional target-cell fractions in fixed-radius focal-cell neighborhoods and reports target exposure and empty-neighborhood diagnostics. |
+| `calculate_multitype_nearest_distance_by_core` | Tests directional median nearest-target distances against within-core target-label randomization; positive effects consistently indicate closer-than-expected targets. |
+| `summarize_stage1_by_donor_and_tissue` | Averages core effects within donor and tissue, then performs one-sided donor-level Wilcoxon tests with FDR correction across target types. |
 | `summarize_nhood_by_donor` | Summarizes core-level neighborhood enrichment within donor, tissue, radius, and neighbor type. Mean/median z-scores are descriptive rather than a formal meta-analysis. |
 | `calculate_knn_niche_continuum` | Quantifies each AM's k-nearest-neighbor composition within core, calculates within-core score correlations, combines core correlations within donor using Fisher z, and tests donor correlations by tissue. |
 | `calculate_radius_niche_continuum` | Quantifies fixed-radius neighbor count, fraction, density, or presence around each AM within core and performs core-, donor-, and tissue-level correlation summaries. |

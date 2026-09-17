@@ -4,10 +4,10 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 0.9
-**Status:** Notebook 00 and the expanded reusable Python pipeline are implemented and locally validated; awaiting scientific review of annotation evidence
+**Version:** 1.0
+**Status:** Notebook 00 and reusable Stage 1 multitype spatial functions are implemented and locally validated; awaiting scientific review of annotation evidence
 **Created:** 2026-09-12
-**Last updated:** 2026-09-16
+**Last updated:** 2026-09-17
 
 ## Document control
 
@@ -247,6 +247,14 @@ Distances must be calculated within the same core; different cores can never be 
 4. Permute AM-state labels within each core while preserving locations and state counts; use at least 1,000 permutations for final inference.
 5. Compare states with donor-aware models and donor/core summaries.
 
+Stage 1 spatial screening uses three complementary multitype endpoints within
+each core: undirected focal-target contact counts at fixed radii, directional
+target fractions in k-nearest and fixed-radius neighborhoods, and directional
+nearest-target distances. Contact pairs are deduplicated because `A-B` and
+`B-A` represent the same undirected edge; directional endpoints retain both
+orientations. Labels excluded from focal/target testing remain in the spatial
+field as background cells so neighborhood geometry is not artificially closed.
+
 Primary endpoints are log nearest-AT2 distance, probability the nearest non-AM cell is AT2, and AT2 enrichment within 30 and 50 um. Other radii and cell types are secondary, with false-discovery-rate control.
 
 ### Phase 5 - Neighborhood composition
@@ -256,6 +264,11 @@ Primary endpoints are log nearest-AT2 distance, probability the nearest non-AM c
 3. Report counts, proportions, local expected proportions, and observed/expected enrichment.
 4. Require headline neighbors to be directionally consistent across informative donors.
 5. Compare against published SOAPy niches only after completing the transparent radius-based analysis.
+
+Core-level permutation results are discovery outputs. Effects are first
+averaged across cores within each donor and tissue; tissue-level signed-rank
+tests then use donors as replicates and correct across target cell types within
+each focal type, method, scale, and tissue.
 
 ### Phase 6 - AM-AT2 communication potential
 
@@ -434,6 +447,9 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | Few donors yield unstable Wilcoxon results | Report donor counts and effect sizes, interpret tests with three donors as exploratory, and require leave-one-donor-out stability before manuscript claims. |
 | The pooled nearest-AT2 `All` test repeats donors across tissues | Treat the supplied pooled row as descriptive; use tissue-specific one-row-per-donor tests or replace it with one donor-level estimate/hierarchical model before manuscript inference. |
 | Unrestricted within-core score shuffling ignores spatial autocorrelation | Interpret the permutation result as an exchangeability test and add a spatially constrained null or donor-level robustness analysis before a strong spatial-mechanism claim. |
+| Multitype label permutations erase native cell-type compartment structure | Interpret Stage 1 effects as enrichment relative to random mixing conditional on cell counts; confirm headline associations with density/boundary sensitivities and a spatially constrained null. |
+| Removing ambiguous or excluded cells changes neighborhood geometry | Retain excluded labels as spatial background while omitting them only from focal/target hypothesis families. |
+| Small donor strata have coarse signed-rank P values | Report effect distributions and donor counts; regard tests with fewer than five donors as exploratory and require leave-one-donor-out directional stability. |
 
 ## Decision gates before implementation
 
@@ -458,3 +474,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 0.7 | 2026-09-16 | Status; notebook architecture; Git structure; validation and documentation | Added one reusable, fully documented Python module at `scripts/xty_am_pipeline.py`; moved Notebook 00 validation, marker extraction and summaries, program scoring, plotting, figure saving, palettes, and marker definitions into public functions; split analysis Steps 6a-6f into independent code cells with preceding methods Markdown; restored explicit legends to spatial annotation figures; added unit and notebook-contract tests; and created a user-facing `README.md` function catalogue with local/HPC examples and maintenance rules. | Removes duplicated notebook implementation while preserving step-wise inspectability, makes the plotting palette reusable, and gives future notebooks a tested API with explicit inputs and outputs. |
 | 0.8 | 2026-09-16 | Reusable functions; palettes; README scope; validation | Consolidated the user-supplied cohort, tissue-abundance, MHCII scoring, `.obs` merge, expression-summary, detection, and mouse-human orthologue utilities into the single Python source module. Added reusable tissue, sex, TMA, and macrophage-subtype palettes; replaced notebook-only display behavior and unavailable Scanpy/statsmodels dependencies with tested NumPy/SciPy implementations; and narrowed `README.md` to dataset metadata, notebook locations/descriptions, and the source-function catalogue. | Makes the supplied code reusable and locally testable without adding source files or undeclared dependencies, while keeping the README focused on dataset and analysis navigation. |
 | 0.9 | 2026-09-16 | Spatial methods; MHCII sensitivity groups; plotting; source API; README; validation risks | Added the supplied AM/AT2 abundance and spatial plots, continuous nearest-AT2 test, per-core Squidpy neighborhood enrichment, donor summarization, balanced score-tail assignment, k-nearest-neighbor and fixed-radius niche-continuum analyses, and their plotting functions to the single Python module. Preserved the supplied plotting behavior, documented every public input/output, added small two-core local regression tests, deferred Squidpy loading, and exposed the new API in `__all__` and the README. Added explicit cautions that balanced tails are relative groups, enrichment-z averaging is descriptive, and very small donor Wilcoxon tests are exploratory. | Makes the HPC-validated spatial workflow reusable and locally smoke-testable while separating descriptive outputs and sensitivity labels from donor-level biological inference. |
+| 1.0 | 2026-09-17 | Phase 4-5 spatial methods; statistical principles; risks; source API; README; validation | Added the multitype Stage 1 contact, k-nearest-neighbor, fixed-radius, nearest-distance, and donor/tissue summary functions. Preserved the existing Squidpy neighborhood function, deduplicated symmetric contact hypotheses, retained excluded labels as spatial background, enforced one donor/tissue per core and valid parameters, and added small synthetic-core regression tests. | Provides a transparent discovery screen across cell types while keeping donor-level replication, null-model limitations, and confirmatory requirements explicit. |

@@ -305,6 +305,11 @@ def test_declared_public_api_contains_new_functions_and_palettes():
         "assign_balanced_mhcii_score_groups",
         "calculate_knn_niche_continuum", "calculate_radius_niche_continuum",
         "plot_radius_core_correlations", "plot_knn_niche_continuum",
+        "calculate_multitype_nhood_enrichment_by_core",
+        "calculate_multitype_knn_niche_by_core",
+        "calculate_multitype_radius_niche_by_core",
+        "calculate_multitype_nearest_distance_by_core",
+        "summarize_stage1_by_donor_and_tissue",
     }
     assert required.issubset(set(pipeline.__all__))
 
