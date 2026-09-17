@@ -6,6 +6,8 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.mplconfig/
+.tmp/
 
 # Large source and intermediate data
 *.h5ad
