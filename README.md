@@ -116,6 +116,32 @@ returns, errors, and relevant scientific interpretation.
 | `calculate_knn_niche_continuum` | Quantifies each AM's k-nearest-neighbor composition within core, calculates within-core score correlations, combines core correlations within donor using Fisher z, and tests donor correlations by tissue. |
 | `calculate_radius_niche_continuum` | Quantifies fixed-radius neighbor count, fraction, density, or presence around each AM within core and performs core-, donor-, and tissue-level correlation summaries. |
 
+### Spatial ligand–receptor and CellChat preparation
+
+Communication analysis has two deliberately separate tracks. The export
+functions prepare validated sparse inputs for formal Spatial CellChat in R.
+The Python functions calculate exploratory spatial expression co-occurrence;
+their correlations are not CellChat probabilities and do not establish causal
+signalling.
+
+| Function | Description |
+|---|---|
+| `assign_balanced_mhcii_extremes` | Assigns equal MHCII-high and MHCII-low AM tails within each core for secondary CellChat contrasts. If either cutoff would split tied scores, all scored AMs in that core remain `Ambiguous`; underpowered or unscored cells remain `Unassigned`. |
+| `add_cellchat_groups` | Creates `CellType_CCC`: MHCII AM tails and middle/unassigned AMs receive distinct labels, while every non-AM cell type is preserved. |
+| `export_spatial_cellchat_inputs` | Validates unique cell/gene IDs, complete metadata, finite two-dimensional coordinates, and finite nonnegative expression; then exports a compressed genes-by-cells Matrix Market matrix, genes, cells, metadata, coordinates, and JSON manifest. |
+| `audit_lr_panel` | Normalizes ligand/receptor symbols, reports panel coverage, and distinguishes simple single-gene pairs from unsupported complex notation such as underscore-delimited receptor complexes. |
+| `radius_weighted_mean` | Calculates uniform or Gaussian-weighted local target expression and neighbor counts inside a physical radius. |
+| `calculate_lr_for_core_arrays` | For one core, correlates the continuous AM MHCII score with AM-gene expression multiplied by local AT2 partner-gene expression in both AM-to-AT2 and AT2-to-AM directions. Reports prevalence, spatial coverage, permutation P values, and overlap of the AM-side gene with the MHCII signature. |
+| `calculate_continuous_spatial_lr` | Runs the bounded array calculation by core and radius without copying full AnnData objects to workers. Seeds depend on stable core/pair identity; diagnostic FDR is controlled within core × direction × radius across LR pairs. |
+| `summarize_lr_by_donor` | Combines valid core correlations within donor using an equal-core Fisher-z mean, so donors with larger cores do not receive extra biological weight. |
+| `summarise_lr_by_donor` | British-spelling alias of `summarize_lr_by_donor`. |
+| `test_lr_across_donors` | Performs two-sided one-sample Wilcoxon tests on independent donor correlations and controls FDR within tissue × direction × radius across LR pairs. |
+
+Untestable constant-expression pairs retain missing correlations and FDR rather
+than being labelled nonsignificant. LR pairs whose AM-side gene contributed to
+the MHCII score are explicitly flagged because those correlations can be
+partly circular and require sensitivity analysis excluding overlapping genes.
+
 ### UMAP, dotplot, and spatial figures
 
 | Function | Description |

@@ -4,10 +4,10 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 1.2
-**Status:** Notebook 00, Stage 1 multitype screening/plots, and Stage 2 AM MHCII–AT2 core, donor, primary-plot, and scale-sensitivity functions are implemented and locally validated; awaiting scientific review of annotation evidence
+**Version:** 1.3
+**Status:** Notebook 00, Stage 1/2 spatial functions, validated Spatial CellChat export, and exploratory continuous AM–AT2 ligand–receptor functions are implemented and locally validated; awaiting scientific review of annotation evidence and a versioned human ligand–receptor resource
 **Created:** 2026-09-12
-**Last updated:** 2026-09-17
+**Last updated:** 2026-09-18
 
 ## Document control
 
@@ -297,18 +297,42 @@ or selecting the first result.
 
 ### Phase 6 - AM-AT2 communication potential
 
-1. Import a versioned human ligand-receptor resource and intersect both genes with the panel.
-2. Analyze AM ligand to AT2 receptor and AT2 ligand to AM receptor separately.
-3. Require each candidate to have:
+Phase 6 has two separate analysis tracks that must not be conflated:
+
+1. **Formal Spatial CellChat track in R.** Use tie-safe, equal within-core
+   MHCII-high/low AM tails only as a secondary categorical contrast; preserve
+   ambiguous and unassigned AM labels; validate and export a sparse
+   genes-by-cells matrix, cell metadata, and coordinates with a manifest; then
+   run the documented version of Spatial CellChat using a versioned human
+   database.
+2. **Exploratory continuous Python track.** For each simple, panel-measured LR
+   pair and direction, calculate each AM's expression of the AM-side gene
+   multiplied by the uniform- or Gaussian-weighted local AT2 expression of the
+   partner gene. Correlate this quantity with the continuous AM MHCII score
+   within core and radius, with deterministic score-label permutations.
+3. Import a versioned human ligand-receptor resource and intersect both genes with the panel. Complex receptor/ligand definitions require explicit database-aware handling and are not silently reduced to simple genes.
+4. Analyze AM ligand to AT2 receptor and AT2 ligand to AM receptor separately.
+5. Require each candidate to have:
    - measured ligand and receptor;
    - expression above a pre-specified prevalence threshold in relevant strata;
    - state-specific or directionally enriched expression;
    - AM-AT2 proximity/neighborhood support;
    - reproducibility across donors.
-4. Rank candidates using expression prevalence, effect size, spatial enrichment, and donor consistency.
-5. Evaluate `SPP1-CD44`, `MIF-CD74/CD44/CXCR4`, `APP-CD74`, and measurable WNT pairs while confirming direction in the selected resource.
+6. Aggregate core correlations within donor by an equal-core Fisher-z mean.
+   Test independent donor estimates against zero using a two-sided Wilcoxon
+   test and control Benjamini-Hochberg FDR within tissue, direction, and radius
+   across LR pairs. Core-level permutation P values/FDR remain diagnostic.
+7. Flag every pair whose AM-side gene contributed to the MHCII score and repeat
+   headline analyses after excluding these overlapping genes to assess
+   mathematical circularity.
+8. Rank candidates using expression prevalence, effect size, spatial enrichment, and donor consistency.
+9. Evaluate `SPP1-CD44`, `MIF-CD74/CD44/CXCR4`, `APP-CD74`, and measurable WNT pairs while confirming direction in the selected resource.
 
-Report these as **putative spatially supported ligand-receptor interactions**. Causal signaling needs independent validation.
+The Python score is **spatial LR expression co-occurrence**, not a CellChat
+communication probability. Only results supported by the formal database-aware
+track, expression prevalence, spatial evidence, and donor replication may be
+described as **putative spatially supported ligand-receptor interactions**.
+Causal signaling needs independent validation.
 
 ### Phase 7 - Age, sex, and region
 
@@ -337,6 +361,11 @@ Report these as **putative spatially supported ligand-receptor interactions**. C
 - Exploratory and confirmatory results are clearly separated.
 - Signed Stage 2 correlations and high-minus-low differences are summarized on
   their native signed scale; ratio or log-ratio transformations are not applied.
+- Spatial LR core correlations are combined on the Fisher-z scale with equal
+  core weight within donor; cell count is diagnostic and never treated as
+  biological replication.
+- Untestable constant-expression LR pairs retain missing statistics rather than
+  receiving an artificial P or FDR value of one.
 
 ## Technical acceptance criteria
 
@@ -480,6 +509,10 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | Empty fixed-radius neighborhoods are encoded as zero AT2 exposure | Exclude AMs with no measured neighbor at that radius, report analyzed and excluded counts, and repeat across radii. |
 | Tied MHCII scores are split arbitrarily at balanced-tail cutoffs | Omit core/radius contrasts whose low or high boundary cuts through a tie; retain the continuous-score analysis as primary. |
 | Core-level Stage 2 permutation P values are mistaken for donor replication | Label core P values/FDR as diagnostics and base final tissue inference on one aggregated effect per donor. |
+| The AM-side LR gene is part of the MHCII score | Flag score-gene overlap in every result and repeat headline tests after excluding overlapping LR pairs or recalculating a leave-one-gene-out score. |
+| Python spatial expression co-occurrence is described as CellChat signalling | Keep the Python and formal R CellChat tracks separate; call the Python statistic co-occurrence and reserve communication terminology for database-aware, donor-replicated evidence. |
+| LR receptor/ligand complexes are represented as simple symbols | Audit pair syntax, restrict the Python implementation to measured single-gene pairs, and handle complexes only with the versioned database's explicit subunit rules. |
+| Core size silently weights donor LR estimates | Average valid core correlations equally on the Fisher-z scale before any donor-level test. |
 
 ## Decision gates before implementation
 
@@ -507,3 +540,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 1.0 | 2026-09-17 | Phase 4-5 spatial methods; statistical principles; risks; source API; README; validation | Added the multitype Stage 1 contact, k-nearest-neighbor, fixed-radius, nearest-distance, and donor/tissue summary functions. Preserved the existing Squidpy neighborhood function, deduplicated symmetric contact hypotheses, retained excluded labels as spatial background, enforced one donor/tissue per core and valid parameters, and added small synthetic-core regression tests. | Provides a transparent discovery screen across cell types while keeping donor-level replication, null-model limitations, and confirmatory requirements explicit. |
 | 1.1 | 2026-09-17 | Status; Phase 5; statistical principles; risks; source API; README; validation | Added the supplied Stage 1A/1B donor-level plots, a metadata-only reproducible multicore runner, and Stage 2 balanced-tail, continuous kNN/radius, nearest-AT2, and donor/tissue summary functions. Excluded empty radius neighborhoods rather than treating them as zero AT2 exposure, omitted ambiguous tied tail boundaries, and used native signed permutation summaries rather than invalid ratio transformations. Per-core seeds now derive from stable core identity rather than encounter order, and the Stage 1B public guard removes non-AM–AT2 pairs before invoking the unchanged visual implementation. | Provides an HPC-ready, donor-aware test of whether higher MHCII-score alveolar macrophages show greater AT2 association while keeping categorical tails secondary and core P values diagnostic. |
 | 1.2 | 2026-09-17 | Status; Phase 5 figures; source API; README; validation | Added the supplied primary Stage 2 donor plot and scale-sensitivity plot with the macaron tissue palette. Corrected malformed significance notation to conventional one-to-four stars, required unique donor rows and unique tissue-test annotations, documented the balanced-tail panel as secondary, and added synthetic plotting/file-output regression tests. | Produces immediately inspectable donor-level primary and sensitivity figures without pseudoreplication or silent duplicate weighting. |
+| 1.3 | 2026-09-18 | Status; Phase 6; statistical principles; risks; source API; README; validation | Added tie-safe MHCII extremes and CellChat labels; strict sparse Spatial CellChat export; simple-pair panel auditing; uniform/Gaussian radius weighting; bidirectional continuous spatial LR co-occurrence with stable core/pair permutation seeds and diagnostic within-family FDR; equal-core Fisher-z donor summaries; and two-sided donor Wilcoxon tests with family-specific FDR. Explicitly separated formal R CellChat from exploratory Python co-occurrence, preserved missing statistics for untestable pairs, and flagged MHCII-score gene overlap. | Makes Notebook 04/HPC communication analysis reproducible while preventing pseudo-replication, arbitrary tie splitting, unsupported complex handling, score circularity, and overstatement of Python co-occurrence as causal signalling. |

@@ -8,7 +8,9 @@ treated as a broad candidate pool, not an automatic alveolar-macrophage call.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import gzip
 import hashlib
+import json
 from pathlib import Path
 import re
 from typing import Any
@@ -31,6 +33,7 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy import sparse
+from scipy.io import mmwrite
 from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
 from scipy.stats import false_discovery_control, spearmanr, wilcoxon
@@ -10993,12 +10996,681 @@ def _plot_stage2_primary_impl(
     return fig, axes, plot_data
 
 
+def assign_balanced_mhcii_extremes(
+    obs, score_col="MHCIIhi_score", celltype_col="CellType_refined",
+    core_col="core_id", am_labels=("AM", "Alveolar Macrophage"),
+    fraction=0.25, min_am=20, high_label="MHCIIhi", low_label="MHCIIlo",
+    middle_label="Ambiguous", unassigned_label="Unassigned",
+):
+    """Assign equal, tie-safe MHCII-score tails within each spatial core.
+
+    Parameters
+    ----------
+    obs
+        Cell metadata table indexed by unique cell identifiers.
+    score_col, celltype_col, core_col
+        Columns containing the continuous MHCII score, refined cell type, and
+        spatial-core identifier.
+    am_labels
+        Values in ``celltype_col`` that identify alveolar macrophages.
+    fraction
+        Fraction of scored AMs assigned to each tail; must be in ``(0, 0.5]``.
+    min_am
+        Minimum number of scored AMs required in a core.
+    high_label, low_label, middle_label, unassigned_label
+        Output labels for high tail, low tail, valid middle, and other cells.
+
+    Returns
+    -------
+    pandas.Series
+        Categorical labels aligned to ``obs.index``. If either tail boundary
+        splits a tie, all scored AMs in that core remain ``middle_label``.
+    """
+    if not isinstance(obs, pd.DataFrame):
+        raise TypeError("obs must be a pandas DataFrame.")
+    required = [score_col, celltype_col, core_col]
+    missing = [column for column in required if column not in obs.columns]
+    if missing:
+        raise KeyError(f"Missing obs columns: {missing}")
+    if not np.isfinite(fraction) or not 0 < float(fraction) <= 0.5:
+        raise ValueError("fraction must be in (0, 0.5].")
+    _validate_positive_integer(min_am, "min_am")
+    labels = pd.Series(unassigned_label, index=obs.index, dtype="object")
+    scores = pd.to_numeric(obs[score_col], errors="coerce")
+    valid = obs[celltype_col].isin(set(am_labels)) & scores.notna() & obs[core_col].notna()
+    for _, indices in obs.loc[valid].groupby(core_col, observed=True, sort=False).groups.items():
+        indices = pd.Index(indices)
+        core_scores = scores.loc[indices]
+        labels.loc[indices] = middle_label
+        n_cells = len(core_scores)
+        if n_cells < min_am or core_scores.nunique() < 2:
+            continue
+        n_tail = min(int(np.floor(n_cells * float(fraction))), n_cells // 2)
+        if n_tail < 1:
+            continue
+        ordered = core_scores.sort_values(kind="mergesort")
+        values = ordered.to_numpy(dtype=float)
+        if values[n_tail - 1] == values[n_tail] or values[-n_tail] == values[-n_tail - 1]:
+            continue
+        labels.loc[ordered.index[:n_tail]] = low_label
+        labels.loc[ordered.index[-n_tail:]] = high_label
+    categories = [low_label, middle_label, high_label, unassigned_label]
+    categorical = labels.astype(
+        pd.CategoricalDtype(categories=categories, ordered=True)
+    )
+    return categorical.cat.remove_unused_categories()
+
+
+def add_cellchat_groups(
+    adata, extreme_col="MHCII_extreme_group", output_col="CellType_CCC",
+    celltype_col="CellType_refined", am_labels=("AM", "Alveolar Macrophage"),
+):
+    """Add CellChat labels while preserving every non-AM cell-type label.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object whose ``obs`` contains cell annotations.
+    extreme_col
+        Column containing MHCII AM classifications.
+    output_col
+        Name of the CellChat grouping column created in ``adata.obs``.
+    celltype_col
+        Refined cell-type column used for AM identification and non-AM labels.
+    am_labels
+        Values in ``celltype_col`` that identify alveolar macrophages.
+
+    Returns
+    -------
+    pandas.Series
+        The categorical CellChat grouping column stored in ``adata.obs``.
+    """
+    missing = [column for column in (extreme_col, celltype_col) if column not in adata.obs]
+    if missing:
+        raise KeyError(f"Missing adata.obs columns: {missing}")
+    groups = adata.obs[celltype_col].astype("object").copy()
+    is_am = groups.isin(set(am_labels))
+    mapping = {"MHCIIhi": "AM_MHCIIhi", "MHCIIlo": "AM_MHCIIlo",
+               "Ambiguous": "AM_MHCII_mid"}
+    mapped = adata.obs.loc[is_am, extreme_col].astype("object").map(mapping)
+    groups.loc[is_am] = mapped.fillna("AM_unassigned")
+    adata.obs[output_col] = pd.Categorical(groups)
+    return adata.obs[output_col]
+
+
+def export_spatial_cellchat_inputs(
+    adata, output_dir, layer=None, spatial_key="spatial",
+    metadata_columns=("CellType_CCC", "CellType_refined", "core_id", "donor_id",
+                      "tissue_annotation"),
+):
+    """Export validated sparse Xenium inputs for formal Spatial CellChat in R.
+
+    Parameters
+    ----------
+    adata
+        AnnData containing nonnegative expression and spatial metadata.
+    output_dir
+        Directory receiving compressed Matrix Market and metadata files.
+    layer
+        Optional expression layer; ``None`` exports ``adata.X``.
+    spatial_key
+        Key in ``adata.obsm`` containing finite two-dimensional coordinates.
+    metadata_columns
+        Required ``adata.obs`` columns exported with the matrix.
+
+    Returns
+    -------
+    dict
+        Paths named ``expression``, ``genes``, ``cells``, ``metadata``,
+        ``coordinates``, and ``manifest``.
+    """
+    if not adata.obs_names.is_unique or not adata.var_names.is_unique:
+        raise ValueError("Cell and gene names must be unique before export.")
+    missing = [column for column in metadata_columns if column not in adata.obs]
+    if missing:
+        raise KeyError(f"Missing required metadata columns: {missing}")
+    if adata.obs.loc[:, list(metadata_columns)].isna().any().any():
+        raise ValueError("Required metadata contains missing values.")
+    if spatial_key not in adata.obsm:
+        raise KeyError(f"{spatial_key!r} is absent from adata.obsm.")
+    coordinates = np.asarray(adata.obsm[spatial_key], dtype=float)
+    if (coordinates.ndim != 2 or coordinates.shape[0] != adata.n_obs or
+            coordinates.shape[1] < 2 or not np.isfinite(coordinates[:, :2]).all()):
+        raise ValueError("Spatial coordinates must match cells and contain finite x/y values.")
+    if layer is not None and layer not in adata.layers:
+        raise KeyError(f"Layer {layer!r} is absent from adata.layers.")
+    expression = sparse.csr_matrix(adata.X if layer is None else adata.layers[layer])
+    if expression.shape != (adata.n_obs, adata.n_vars):
+        raise ValueError("Expression matrix shape does not match AnnData dimensions.")
+    if expression.data.size and not np.isfinite(expression.data).all():
+        raise ValueError("Expression contains non-finite values.")
+    if expression.data.size and np.any(expression.data < 0):
+        raise ValueError("Expression contains negative values; raw nonnegative input is required.")
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "expression": output_dir / "expression_genes_by_cells.mtx.gz",
+        "genes": output_dir / "genes.tsv.gz", "cells": output_dir / "cells.tsv.gz",
+        "metadata": output_dir / "metadata.csv.gz",
+        "coordinates": output_dir / "coordinates_um.csv.gz",
+        "manifest": output_dir / "manifest.json",
+    }
+    with gzip.open(paths["expression"], "wb") as handle:
+        mmwrite(handle, expression.T.tocoo())
+    pd.Series(adata.var_names.astype(str)).to_csv(
+        paths["genes"], index=False, header=False, compression="gzip")
+    pd.Series(adata.obs_names.astype(str)).to_csv(
+        paths["cells"], index=False, header=False, compression="gzip")
+    metadata = adata.obs.loc[:, list(metadata_columns)].copy()
+    metadata.insert(0, "cell_id", adata.obs_names.astype(str))
+    metadata.to_csv(paths["metadata"], index=False, compression="gzip")
+    pd.DataFrame({"cell_id": adata.obs_names.astype(str), "x_um": coordinates[:, 0],
+                  "y_um": coordinates[:, 1]}).to_csv(
+        paths["coordinates"], index=False, compression="gzip")
+    manifest = {"n_cells": int(adata.n_obs), "n_genes": int(adata.n_vars),
+                "nnz": int(expression.nnz), "layer": "X" if layer is None else str(layer),
+                "spatial_key": spatial_key, "expression_orientation": "genes_by_cells",
+                "metadata_columns": list(metadata_columns)}
+    paths["manifest"].write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    return paths
+
+
+_SIMPLE_GENE_PATTERN = re.compile(r"^[A-Za-z0-9.-]+$")
+
+
+def audit_lr_panel(lr_pairs, panel_genes, ligand_col="ligand", receptor_col="receptor"):
+    """Audit simple ligand–receptor pairs against the measured Xenium panel.
+
+    Parameters
+    ----------
+    lr_pairs
+        Table with ligand and receptor symbol columns.
+    panel_genes
+        Gene symbols measured by the Xenium panel.
+    ligand_col, receptor_col
+        Column names in ``lr_pairs``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Pair table with normalized symbols and measurable/simple-pair flags.
+    """
+    if not isinstance(lr_pairs, pd.DataFrame):
+        raise TypeError("lr_pairs must be a pandas DataFrame.")
+    missing = [column for column in (ligand_col, receptor_col) if column not in lr_pairs]
+    if missing:
+        raise KeyError(f"Missing ligand-receptor columns: {missing}")
+    audit = lr_pairs.copy()
+    audit[ligand_col] = audit[ligand_col].astype("string").str.strip().str.upper()
+    audit[receptor_col] = audit[receptor_col].astype("string").str.strip().str.upper()
+    panel = {str(gene).strip().upper() for gene in panel_genes}
+    audit["ligand_in_panel"] = audit[ligand_col].isin(panel)
+    audit["receptor_in_panel"] = audit[receptor_col].isin(panel)
+    audit["ligand_is_simple"] = audit[ligand_col].fillna("").str.match(_SIMPLE_GENE_PATTERN)
+    audit["receptor_is_simple"] = audit[receptor_col].fillna("").str.match(_SIMPLE_GENE_PATTERN)
+    audit["simple_pair"] = audit["ligand_is_simple"] & audit["receptor_is_simple"]
+    audit["complete_pair"] = audit["simple_pair"] & audit["ligand_in_panel"] & audit["receptor_in_panel"]
+    return audit
+
+
+def radius_weighted_mean(query_coords, target_coords, target_values, radius,
+                         kernel="uniform", sigma=None):
+    """Calculate local target-expression means around query coordinates.
+
+    Parameters
+    ----------
+    query_coords, target_coords
+        Finite coordinate arrays with rows as query and target cells.
+    target_values
+        Target-cell values aligned to ``target_coords``.
+    radius
+        Positive maximum neighbor distance.
+    kernel
+        ``"uniform"`` or ``"gaussian"`` weighting.
+    sigma
+        Positive Gaussian bandwidth; defaults to ``radius / 2``.
+
+    Returns
+    -------
+    tuple of numpy.ndarray
+        Local means and finite-target neighbor counts.
+    """
+    query, target = np.asarray(query_coords, dtype=float), np.asarray(target_coords, dtype=float)
+    values = np.asarray(target_values, dtype=float).reshape(-1)
+    for name, coordinates in (("query_coords", query), ("target_coords", target)):
+        if coordinates.ndim != 2 or coordinates.shape[1] < 2:
+            raise ValueError(f"{name} must be a two-dimensional coordinate array.")
+        if not np.isfinite(coordinates[:, :2]).all():
+            raise ValueError(f"{name} must contain finite coordinates.")
+    if len(values) != len(target):
+        raise ValueError("target_values must align with target_coords.")
+    if not np.isfinite(radius) or float(radius) <= 0:
+        raise ValueError("radius must be positive and finite.")
+    if kernel not in {"uniform", "gaussian"}:
+        raise ValueError("kernel must be 'uniform' or 'gaussian'.")
+    if sigma is None:
+        sigma = float(radius) / 2
+    if kernel == "gaussian" and (not np.isfinite(sigma) or float(sigma) <= 0):
+        raise ValueError("sigma must be positive and finite for a Gaussian kernel.")
+    finite = np.isfinite(values)
+    target, values = target[finite, :2], values[finite]
+    means, counts = np.full(len(query), np.nan), np.zeros(len(query), dtype=int)
+    if not len(target):
+        return means, counts
+    neighborhoods = cKDTree(target).query_ball_point(query[:, :2], r=float(radius))
+    for index, neighbors in enumerate(neighborhoods):
+        if not neighbors:
+            continue
+        neighbors = np.asarray(neighbors, dtype=int)
+        counts[index] = len(neighbors)
+        if kernel == "uniform":
+            means[index] = np.mean(values[neighbors])
+        else:
+            distances = np.linalg.norm(target[neighbors] - query[index, :2], axis=1)
+            log_weights = -0.5 * (distances / float(sigma)) ** 2
+            weights = np.exp(log_weights - np.max(log_weights))
+            means[index] = np.average(values[neighbors], weights=weights)
+    return means, counts
+
+
+def _safe_spearman_with_pvalue(x, y, min_cells):
+    """Return rho, asymptotic P value, and finite observation count."""
+    x, y = np.asarray(x, dtype=float), np.asarray(y, dtype=float)
+    valid = np.isfinite(x) & np.isfinite(y)
+    x, y = x[valid], y[valid]
+    if len(x) < min_cells or np.unique(x).size < 2 or np.unique(y).size < 2:
+        return np.nan, np.nan, int(len(x))
+    result = spearmanr(x, y)
+    return float(result.statistic), float(result.pvalue), int(len(x))
+
+
+_LR_CORE_COLUMNS = (
+    "direction", "ligand", "receptor", "am_gene", "at2_gene", "radius_um", "rho",
+    "asymptotic_p", "empirical_p", "n_am_tested", "n_am_with_at2_neighbors",
+    "pct_am_with_at2_neighbors", "median_at2_neighbors", "pct_am_gene_expressing",
+    "pct_at2_gene_expressing", "mhcii_signature_overlap_checked",
+    "am_gene_in_mhcii_signature",
+)
+
+
+def calculate_lr_for_core_arrays(
+    am_xy, at2_xy, mhcii_score, am_expr, at2_expr, lr_pairs, radius,
+    min_am=20, n_permutations=999, random_state=123, kernel="uniform", sigma=None,
+    mhcii_signature_genes=None, min_pct_expressing=0.0,
+):
+    """Correlate AM MHCII score with local AM–AT2 LR co-expression.
+
+    Parameters
+    ----------
+    am_xy, at2_xy
+        Coordinate arrays for AM and AT2 cells from one core.
+    mhcii_score
+        Continuous MHCII score aligned to AM rows.
+    am_expr, at2_expr
+        Mappings from gene symbols to expression vectors.
+    lr_pairs
+        DataFrame containing simple ``ligand`` and ``receptor`` symbols.
+    radius
+        Physical neighborhood radius.
+    min_am
+        Minimum AM observations required for correlation.
+    n_permutations, random_state
+        Permutation count and deterministic master seed.
+    kernel, sigma
+        Spatial weighting kernel and optional bandwidth.
+    mhcii_signature_genes
+        Optional score genes used for circularity flags.
+    min_pct_expressing
+        Minimum prevalence required on both sides of a pair.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Directional LR correlations, diagnostics, prevalence, and overlap flags.
+    """
+    _validate_positive_integer(min_am, "min_am")
+    if not isinstance(n_permutations, (int, np.integer)) or n_permutations < 0:
+        raise ValueError("n_permutations must be a nonnegative integer.")
+    if not 0 <= float(min_pct_expressing) <= 100:
+        raise ValueError("min_pct_expressing must be in [0, 100].")
+    am_xy, at2_xy = np.asarray(am_xy, dtype=float), np.asarray(at2_xy, dtype=float)
+    scores = np.asarray(mhcii_score, dtype=float).reshape(-1)
+    if len(scores) != len(am_xy):
+        raise ValueError("mhcii_score must align with am_xy.")
+    am_map = {str(gene).upper(): np.asarray(values, dtype=float).reshape(-1)
+              for gene, values in am_expr.items()}
+    at2_map = {str(gene).upper(): np.asarray(values, dtype=float).reshape(-1)
+               for gene, values in at2_expr.items()}
+    if any(len(values) != len(am_xy) for values in am_map.values()):
+        raise ValueError("Every AM expression vector must align with am_xy.")
+    if any(len(values) != len(at2_xy) for values in at2_map.values()):
+        raise ValueError("Every AT2 expression vector must align with at2_xy.")
+    pairs = audit_lr_panel(lr_pairs, set(am_map) & set(at2_map))
+    pairs = pairs.loc[pairs["complete_pair"]].drop_duplicates(["ligand", "receptor"])
+    checked = mhcii_signature_genes is not None
+    signature = {str(gene).strip().upper() for gene in (mhcii_signature_genes or ())}
+    records = []
+    for pair in pairs.itertuples(index=False):
+        ligand, receptor = str(pair.ligand), str(pair.receptor)
+        for direction, am_gene, at2_gene in (("AM_to_AT2", ligand, receptor),
+                                              ("AT2_to_AM", receptor, ligand)):
+            am_values, at2_values = am_map[am_gene], at2_map[at2_gene]
+            pct_am = float(np.mean(np.isfinite(am_values) & (am_values > 0)) * 100)
+            pct_at2 = float(np.mean(np.isfinite(at2_values) & (at2_values > 0)) * 100)
+            if pct_am < min_pct_expressing or pct_at2 < min_pct_expressing:
+                continue
+            local_at2, counts = radius_weighted_mean(
+                am_xy, at2_xy, at2_values, radius, kernel=kernel, sigma=sigma)
+            communication = am_values * local_at2
+            rho, asymptotic_p, n_tested = _safe_spearman_with_pvalue(scores, communication, min_am)
+            empirical_p = np.nan
+            if np.isfinite(rho) and n_permutations:
+                seed = _stable_core_seed(random_state, (direction, ligand, receptor, float(radius)))
+                rng = np.random.default_rng(seed)
+                finite = np.isfinite(scores) & np.isfinite(communication)
+                x, y = scores[finite], communication[finite]
+                null = np.asarray([spearmanr(rng.permutation(x), y).statistic
+                                   for _ in range(n_permutations)], dtype=float)
+                empirical_p = float((1 + np.count_nonzero(np.abs(null) >= abs(rho))) /
+                                    (n_permutations + 1))
+            has_neighbors = counts > 0
+            records.append({
+                "direction": direction, "ligand": ligand, "receptor": receptor,
+                "am_gene": am_gene, "at2_gene": at2_gene, "radius_um": float(radius),
+                "rho": rho, "asymptotic_p": asymptotic_p, "empirical_p": empirical_p,
+                "n_am_tested": n_tested,
+                "n_am_with_at2_neighbors": int(np.count_nonzero(has_neighbors)),
+                "pct_am_with_at2_neighbors": float(np.mean(has_neighbors) * 100),
+                "median_at2_neighbors": float(np.median(counts)),
+                "pct_am_gene_expressing": pct_am, "pct_at2_gene_expressing": pct_at2,
+                "mhcii_signature_overlap_checked": checked,
+                "am_gene_in_mhcii_signature": bool(am_gene in signature) if checked else False,
+            })
+    return pd.DataFrame.from_records(records, columns=_LR_CORE_COLUMNS)
+
+
+def _extract_lr_expression(expression, rows, gene_indices):
+    """Extract dense vectors for only the requested rows and genes."""
+    result = {}
+    for gene, column in gene_indices.items():
+        vector = expression[rows, column]
+        if sparse.issparse(vector):
+            vector = vector.toarray()
+        result[gene] = np.asarray(vector, dtype=float).reshape(-1)
+    return result
+
+
+def _calculate_lr_task(task):
+    """Run one bounded core/radius task without retaining AnnData."""
+    result = calculate_lr_for_core_arrays(**task["arguments"])
+    if result.empty:
+        return result
+    for column, value in task["metadata"].items():
+        result.insert(len(result.columns), column, value)
+    return result
+
+
+def calculate_continuous_spatial_lr(
+    adata, lr_pairs, radii=(25, 50, 100), score_col="MHCIIhi_score",
+    celltype_col="CellType_refined", core_col="core_id", donor_col="donor_id",
+    tissue_col="tissue_annotation", spatial_key="spatial", layer=None,
+    am_labels=("AM", "Alveolar Macrophage"), at2_labels=("AT2",), min_am=20,
+    min_at2=10, n_permutations=999, random_state=123, n_jobs=1, verbose=0,
+    coordinate_scale=1.0, kernel="uniform", sigma=None, mhcii_signature_genes=None,
+    min_pct_expressing=0.0,
+):
+    """Run exploratory continuous spatial LR co-expression analysis by core.
+
+    Parameters
+    ----------
+    adata
+        AnnData containing expression, cell types, MHCII scores, and coordinates.
+    lr_pairs
+        Candidate simple ligand–receptor pairs.
+    radii
+        Positive physical neighborhood radii after coordinate scaling.
+    score_col, celltype_col, core_col, donor_col, tissue_col
+        Score and design-metadata columns.
+    spatial_key, layer
+        Spatial key and optional expression layer.
+    am_labels, at2_labels
+        Labels identifying AM and AT2 cells.
+    min_am, min_at2
+        Minimum cell counts required per core.
+    n_permutations, random_state
+        Permutation count and deterministic master seed.
+    n_jobs, verbose
+        Worker count and joblib progress level.
+    coordinate_scale
+        Multiplier converting coordinates to micrometres.
+    kernel, sigma
+        Spatial weighting kernel and optional bandwidth.
+    mhcii_signature_genes
+        Score genes reported as circularity flags.
+    min_pct_expressing
+        Minimum expression prevalence on each pair side.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Core-level correlations with within-core/direction/radius FDR.
+
+    Notes
+    -----
+    This is expression co-occurrence, not a CellChat probability or causal
+    communication evidence. Donor-level tests are required for inference.
+    """
+    _validate_positive_integer(n_jobs, "n_jobs")
+    _validate_positive_integer(min_at2, "min_at2")
+    required = [score_col, celltype_col, core_col, donor_col, tissue_col]
+    missing = [column for column in required if column not in adata.obs]
+    if missing:
+        raise KeyError(f"Missing adata.obs columns: {missing}")
+    if spatial_key not in adata.obsm:
+        raise KeyError(f"{spatial_key!r} is absent from adata.obsm.")
+    coordinates = np.asarray(adata.obsm[spatial_key], dtype=float)
+    if coordinates.ndim != 2 or coordinates.shape[0] != adata.n_obs or coordinates.shape[1] < 2:
+        raise ValueError("Spatial coordinates must match cells and contain x/y columns.")
+    coordinates = coordinates[:, :2] * float(coordinate_scale)
+    if not np.isfinite(coordinates).all():
+        raise ValueError("Spatial coordinates must be finite.")
+    radii = tuple(float(radius) for radius in radii)
+    if not radii or not all(np.isfinite(radius) and radius > 0 for radius in radii):
+        raise ValueError("radii must contain positive finite values.")
+    expression = adata.X if layer is None else adata.layers[layer]
+    genes = pd.Index([str(gene).strip().upper() for gene in adata.var_names])
+    if genes.has_duplicates:
+        raise ValueError("Gene names must be unique after case normalization.")
+    audited = audit_lr_panel(lr_pairs, genes)
+    pairs = audited.loc[audited["complete_pair"], ["ligand", "receptor"]].drop_duplicates()
+    output_columns = ("core_id", "donor_id", "tissue_annotation", *_LR_CORE_COLUMNS, "core_FDR")
+    if pairs.empty:
+        return pd.DataFrame(columns=output_columns)
+    needed = sorted(set(pairs["ligand"]) | set(pairs["receptor"]))
+    gene_indices = {gene: int(genes.get_loc(gene)) for gene in needed}
+    celltypes = adata.obs[celltype_col].astype("object")
+    scores = pd.to_numeric(adata.obs[score_col], errors="coerce").to_numpy(dtype=float)
+    tasks = []
+    for core_id, positions in adata.obs.groupby(core_col, observed=True, sort=False).indices.items():
+        positions = np.asarray(positions, dtype=int)
+        donors = pd.unique(adata.obs.iloc[positions][donor_col].dropna())
+        tissues = pd.unique(adata.obs.iloc[positions][tissue_col].dropna())
+        if len(donors) != 1 or len(tissues) != 1:
+            raise ValueError(f"Core {core_id!r} must map to exactly one donor and tissue.")
+        core_types = celltypes.iloc[positions]
+        am_local = np.flatnonzero(core_types.isin(set(am_labels)).to_numpy())
+        at2_local = np.flatnonzero(core_types.isin(set(at2_labels)).to_numpy())
+        am_local = am_local[np.isfinite(scores[positions[am_local]])]
+        if len(am_local) < min_am or len(at2_local) < min_at2:
+            continue
+        am_positions, at2_positions = positions[am_local], positions[at2_local]
+        am_expression = _extract_lr_expression(expression, am_positions, gene_indices)
+        at2_expression = _extract_lr_expression(expression, at2_positions, gene_indices)
+        for radius in radii:
+            tasks.append({"arguments": {
+                "am_xy": coordinates[am_positions], "at2_xy": coordinates[at2_positions],
+                "mhcii_score": scores[am_positions], "am_expr": am_expression,
+                "at2_expr": at2_expression, "lr_pairs": pairs, "radius": radius,
+                "min_am": min_am, "n_permutations": n_permutations,
+                "random_state": _stable_core_seed(random_state, (core_id, radius)),
+                "kernel": kernel, "sigma": sigma,
+                "mhcii_signature_genes": mhcii_signature_genes,
+                "min_pct_expressing": min_pct_expressing,
+            }, "metadata": {"core_id": core_id, "donor_id": donors[0],
+                              "tissue_annotation": tissues[0]}})
+    if n_jobs == 1:
+        results = [_calculate_lr_task(task) for task in tasks]
+    else:
+        try:
+            from joblib import Parallel, delayed, parallel_backend
+        except ImportError as error:
+            raise ImportError("Parallel LR analysis requires joblib.") from error
+        with parallel_backend("loky", inner_max_num_threads=1):
+            results = Parallel(n_jobs=min(n_jobs, max(len(tasks), 1)), verbose=verbose)(
+                delayed(_calculate_lr_task)(task) for task in tasks)
+    results = [result for result in results if not result.empty]
+    if not results:
+        return pd.DataFrame(columns=output_columns)
+    combined = pd.concat(results, ignore_index=True, sort=False)
+    combined["core_FDR"] = np.nan
+    p_column = "empirical_p" if n_permutations else "asymptotic_p"
+    for indices in combined.groupby(
+        ["core_id", "direction", "radius_um"], observed=True, dropna=False
+    ).groups.values():
+        indices = list(indices)
+        combined.loc[indices, "core_FDR"] = _bh_adjust(
+            combined.loc[indices, p_column].to_numpy(dtype=float))
+    return combined.loc[:, output_columns]
+
+
+_LR_DONOR_COLUMNS = (
+    "donor_id", "tissue_annotation", "direction", "ligand", "receptor", "radius_um",
+    "donor_rho", "n_cores", "total_n_am_tested", "mean_pct_am_gene_expressing",
+    "mean_pct_at2_gene_expressing", "mean_pct_am_with_at2_neighbors",
+)
+
+
+def summarize_lr_by_donor(core_results):
+    """Aggregate core LR correlations to equal-core donor Fisher-z estimates.
+
+    Parameters
+    ----------
+    core_results
+        Core-level output from :func:`calculate_continuous_spatial_lr`.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One equal-core-weighted estimate per donor, tissue, direction, pair,
+        and radius, with descriptive diagnostics.
+    """
+    required = {"core_id", "donor_id", "tissue_annotation", "direction", "ligand",
+                "receptor", "radius_um", "rho", "n_am_tested",
+                "pct_am_gene_expressing", "pct_at2_gene_expressing",
+                "pct_am_with_at2_neighbors"}
+    missing = sorted(required.difference(core_results.columns))
+    if missing:
+        raise KeyError(f"Missing core-result columns: {missing}")
+    identity = core_results[["core_id", "donor_id", "tissue_annotation"]].drop_duplicates()
+    if (identity.groupby("core_id", observed=True, dropna=False).size() > 1).any():
+        raise ValueError("Each core_id must map to one donor and tissue.")
+    grouping = ["donor_id", "tissue_annotation", "direction", "ligand", "receptor", "radius_um"]
+    records = []
+    for keys, group in core_results.groupby(grouping, observed=True, dropna=False):
+        valid = group["rho"].notna() & group["n_am_tested"].ge(4)
+        group = group.loc[valid]
+        if group.empty:
+            continue
+        rhos = np.clip(group["rho"].to_numpy(dtype=float), -0.999999, 0.999999)
+        record = dict(zip(grouping, keys))
+        record.update({"donor_rho": float(np.tanh(np.mean(np.arctanh(rhos)))),
+                       "n_cores": int(group["core_id"].nunique()),
+                       "total_n_am_tested": int(group["n_am_tested"].sum()),
+                       "mean_pct_am_gene_expressing": float(group["pct_am_gene_expressing"].mean()),
+                       "mean_pct_at2_gene_expressing": float(group["pct_at2_gene_expressing"].mean()),
+                       "mean_pct_am_with_at2_neighbors": float(group["pct_am_with_at2_neighbors"].mean())})
+        records.append(record)
+    return pd.DataFrame.from_records(records, columns=_LR_DONOR_COLUMNS)
+
+
+def summarise_lr_by_donor(core_results):
+    """Alias for :func:`summarize_lr_by_donor` using British spelling.
+
+    Parameters
+    ----------
+    core_results
+        Core-level continuous spatial LR results.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Equal-core-weighted donor summaries.
+    """
+    return summarize_lr_by_donor(core_results)
+
+
+_LR_TEST_COLUMNS = (
+    "tissue_annotation", "direction", "ligand", "receptor", "radius_um", "n_donors",
+    "mean_donor_rho", "median_donor_rho", "wilcoxon_statistic", "p_value", "FDR",
+)
+
+
+def test_lr_across_donors(donor_summary, min_donors=5):
+    """Test donor LR correlations against zero with two-sided Wilcoxon tests.
+
+    Parameters
+    ----------
+    donor_summary
+        Donor-level output from :func:`summarize_lr_by_donor`.
+    min_donors
+        Minimum independent donors required for a tissue-level test.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Tissue-level tests with FDR controlled within tissue, direction, and
+        radius across LR pairs.
+    """
+    _validate_positive_integer(min_donors, "min_donors")
+    required = {"donor_id", "tissue_annotation", "direction", "ligand", "receptor",
+                "radius_um", "donor_rho"}
+    missing = sorted(required.difference(donor_summary.columns))
+    if missing:
+        raise KeyError(f"Missing donor-summary columns: {missing}")
+    grouping = ["tissue_annotation", "direction", "ligand", "receptor", "radius_um"]
+    if donor_summary.duplicated(grouping + ["donor_id"], keep=False).any():
+        raise ValueError("Each donor must have one estimate per tissue/direction/pair/radius.")
+    records = []
+    for keys, group in donor_summary.groupby(grouping, observed=True, dropna=False):
+        values = group["donor_rho"].dropna().to_numpy(dtype=float)
+        statistic = p_value = np.nan
+        if len(values) >= min_donors and np.any(values != 0):
+            result = wilcoxon(values, alternative="two-sided", zero_method="wilcox")
+            statistic, p_value = float(result.statistic), float(result.pvalue)
+        record = dict(zip(grouping, keys))
+        record.update({"n_donors": int(len(values)),
+                       "mean_donor_rho": float(np.mean(values)) if len(values) else np.nan,
+                       "median_donor_rho": float(np.median(values)) if len(values) else np.nan,
+                       "wilcoxon_statistic": statistic, "p_value": p_value, "FDR": np.nan})
+        records.append(record)
+    tests = pd.DataFrame.from_records(records, columns=_LR_TEST_COLUMNS)
+    if tests.empty:
+        return tests
+    for indices in tests.groupby(
+        ["tissue_annotation", "direction", "radius_um"], observed=True, dropna=False
+    ).groups.values():
+        indices = list(indices)
+        tests.loc[indices, "FDR"] = _bh_adjust(tests.loc[indices, "p_value"].to_numpy())
+    return tests
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
     "MACROPHAGE_SUBTYPE_PALETTE", "PROGRAM_CMAP", "REQUIRED_OBS_COLUMNS",
     "SEX_PALETTE", "TISSUE_PALETTE", "TMA_PALETTE",
-    "add_human_gene_name", "assign_balanced_mhcii_score_groups",
+    "add_human_gene_name", "add_cellchat_groups", "assign_balanced_mhcii_extremes",
+    "assign_balanced_mhcii_score_groups", "audit_lr_panel",
     "assign_mhcii_single_signature", "calculate_knn_niche_continuum",
     "calculate_multitype_knn_niche_by_core",
     "calculate_multitype_nearest_distance_by_core",
@@ -11009,6 +11681,7 @@ __all__ = [
     "calculate_stage2_nearest_at2_by_core",
     "calculate_stage2_radius_continuum_by_core",
     "calculate_nhood_enrichment_by_core", "calculate_radius_niche_continuum",
+    "calculate_continuous_spatial_lr", "calculate_lr_for_core_arrays",
     "cluster_expression_summary", "compute_program_scores",
     "configure_plot_style", "extract_marker_matrices",
     "gene_detection_by_group", "marker_availability_table",
@@ -11021,11 +11694,13 @@ __all__ = [
     "plot_marker_dotplot", "plot_nhood_enrichment_donor_tissue",
     "plot_program_umap", "plot_radius_core_correlations",
     "plot_spatial_celltypes",
-    "plot_spatial_focus", "plot_spatial_programs", "save_figure",
+    "plot_spatial_focus", "plot_spatial_programs", "radius_weighted_mean",
+    "save_figure", "export_spatial_cellchat_inputs",
     "select_representative_cores", "summarize_markers",
+    "summarize_lr_by_donor", "summarise_lr_by_donor",
     "summarize_nhood_by_donor", "summarize_stage1_by_donor_and_tissue",
     "summarize_stage2_by_donor_and_tissue",
-    "test_continuous_mhcii_at2_proximity",
+    "test_continuous_mhcii_at2_proximity", "test_lr_across_donors",
     "run_spatial_function_multicore", "run_stage2_multicore",
     "validate_xenium_metadata",
 ]
