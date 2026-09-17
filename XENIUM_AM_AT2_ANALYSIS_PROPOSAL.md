@@ -4,8 +4,8 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 1.1
-**Status:** Notebook 00, Stage 1 multitype screening/plots, and Stage 2 AM MHCII–AT2 core and donor functions are implemented and locally validated; awaiting scientific review of annotation evidence
+**Version:** 1.2
+**Status:** Notebook 00, Stage 1 multitype screening/plots, and Stage 2 AM MHCII–AT2 core, donor, primary-plot, and scale-sensitivity functions are implemented and locally validated; awaiting scientific review of annotation evidence
 **Created:** 2026-09-12
 **Last updated:** 2026-09-17
 
@@ -286,6 +286,15 @@ inference averages cores within donor and uses one donor effect per tissue in a
 one-sided Wilcoxon signed-rank test, followed by Benjamini-Hochberg correction
 within method, effect type, scale, and tissue.
 
+The primary Stage 2 figure displays individual donor effects, donor medians and
+interquartile ranges, and tissue-test FDR at prespecified scales: k = 15,
+50-micrometre continuous exposure, and nearest-AT2 proximity. The balanced-tail
+50-micrometre panel is explicitly secondary. A separate scale-sensitivity
+figure shows donor median and IQR across k or radius values without treating
+cells or cores as replicates. Plotting functions reject duplicated donor rows
+and ambiguous duplicate tissue-test rows rather than silently double-weighting
+or selecting the first result.
+
 ### Phase 6 - AM-AT2 communication potential
 
 1. Import a versioned human ligand-receptor resource and intersect both genes with the panel.
@@ -497,3 +506,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 0.9 | 2026-09-16 | Spatial methods; MHCII sensitivity groups; plotting; source API; README; validation risks | Added the supplied AM/AT2 abundance and spatial plots, continuous nearest-AT2 test, per-core Squidpy neighborhood enrichment, donor summarization, balanced score-tail assignment, k-nearest-neighbor and fixed-radius niche-continuum analyses, and their plotting functions to the single Python module. Preserved the supplied plotting behavior, documented every public input/output, added small two-core local regression tests, deferred Squidpy loading, and exposed the new API in `__all__` and the README. Added explicit cautions that balanced tails are relative groups, enrichment-z averaging is descriptive, and very small donor Wilcoxon tests are exploratory. | Makes the HPC-validated spatial workflow reusable and locally smoke-testable while separating descriptive outputs and sensitivity labels from donor-level biological inference. |
 | 1.0 | 2026-09-17 | Phase 4-5 spatial methods; statistical principles; risks; source API; README; validation | Added the multitype Stage 1 contact, k-nearest-neighbor, fixed-radius, nearest-distance, and donor/tissue summary functions. Preserved the existing Squidpy neighborhood function, deduplicated symmetric contact hypotheses, retained excluded labels as spatial background, enforced one donor/tissue per core and valid parameters, and added small synthetic-core regression tests. | Provides a transparent discovery screen across cell types while keeping donor-level replication, null-model limitations, and confirmatory requirements explicit. |
 | 1.1 | 2026-09-17 | Status; Phase 5; statistical principles; risks; source API; README; validation | Added the supplied Stage 1A/1B donor-level plots, a metadata-only reproducible multicore runner, and Stage 2 balanced-tail, continuous kNN/radius, nearest-AT2, and donor/tissue summary functions. Excluded empty radius neighborhoods rather than treating them as zero AT2 exposure, omitted ambiguous tied tail boundaries, and used native signed permutation summaries rather than invalid ratio transformations. Per-core seeds now derive from stable core identity rather than encounter order, and the Stage 1B public guard removes non-AM–AT2 pairs before invoking the unchanged visual implementation. | Provides an HPC-ready, donor-aware test of whether higher MHCII-score alveolar macrophages show greater AT2 association while keeping categorical tails secondary and core P values diagnostic. |
+| 1.2 | 2026-09-17 | Status; Phase 5 figures; source API; README; validation | Added the supplied primary Stage 2 donor plot and scale-sensitivity plot with the macaron tissue palette. Corrected malformed significance notation to conventional one-to-four stars, required unique donor rows and unique tissue-test annotations, documented the balanced-tail panel as secondary, and added synthetic plotting/file-output regression tests. | Produces immediately inspectable donor-level primary and sensitivity figures without pseudoreplication or silent duplicate weighting. |

@@ -10216,6 +10216,783 @@ def plot_stage1B_primary(
     )
 
 
+def _stage2_significance_label(p):
+    """Return conventional significance stars for a Stage 2 P or Q value."""
+    if not np.isfinite(p):
+        return "NA"
+    if p < 0.0001:
+        return "****"
+    if p < 0.001:
+        return "***"
+    if p < 0.01:
+        return "**"
+    if p < 0.05:
+        return "*"
+    return "ns"
+
+
+def _validate_stage2_plot_donors(
+    donor_summary,
+    donor_col="donor_id",
+    value_col="donor_effect",
+):
+    """Validate a one-row-per-donor Stage 2 plotting table."""
+    required = {
+        "method", "scale_type", "scale", "tissue_annotation",
+        donor_col, value_col,
+    }
+    missing = required.difference(donor_summary.columns)
+    if missing:
+        raise KeyError(
+            f"Missing donor_summary columns: {sorted(missing)}"
+        )
+    identity = ["method", "scale", "tissue_annotation", donor_col]
+    duplicate = donor_summary.duplicated(identity, keep=False)
+    if duplicate.any():
+        example = donor_summary.loc[duplicate, identity].iloc[0].to_dict()
+        raise ValueError(
+            "donor_summary contains duplicate donor rows for a method, scale, "
+            f"and tissue; example: {example}"
+        )
+
+
+def _validate_stage2_plot_tests(tissue_tests):
+    """Validate uniqueness of Stage 2 tissue-test annotations."""
+    required = {"method", "scale", "tissue_annotation"}
+    missing = required.difference(tissue_tests.columns)
+    if missing:
+        raise KeyError(
+            f"Missing tissue_tests columns: {sorted(missing)}"
+        )
+    identity = ["method", "scale", "tissue_annotation"]
+    duplicate = tissue_tests.duplicated(identity, keep=False)
+    if duplicate.any():
+        example = tissue_tests.loc[duplicate, identity].iloc[0].to_dict()
+        raise ValueError(
+            "tissue_tests contains duplicate tissue-test rows for a method, "
+            f"scale, and tissue; example: {example}"
+        )
+
+
+def plot_stage2_primary(
+    donor_summary,
+    tissue_tests,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    method_config=None,
+    donor_col="donor_id",
+    value_col="donor_effect",
+    show_donor_labels=False,
+    random_state=123,
+    save=None,
+    dpi=300,
+):
+    """Plot primary donor-level MHCII-score associations with AT2 context.
+
+    Parameters
+    ----------
+    donor_summary
+        One-row-per-donor output from `summarize_stage2_by_donor_and_tissue`.
+    tissue_tests
+        Unique tissue-level test rows from the same Stage 2 summarizer.
+    tissue_order
+        Tissue annotations and display order.
+    tissue_colors
+        Optional mapping from tissue annotation to macaron plot color.
+    method_config
+        Optional dictionaries declaring method, scale, title, subtitle, axis
+        label, and whether a panel is primary.
+    donor_col
+        Column containing biological donor identifiers.
+    value_col
+        Column containing donor-level spatial effects.
+    show_donor_labels
+        Whether to annotate plotted donor points.
+    random_state
+        Seed controlling visual point jitter only.
+    save
+        Optional figure filename.
+    dpi
+        Resolution used when `save` is provided.
+
+    Returns
+    -------
+    fig, axes, plot_data : tuple
+        Matplotlib figure, axes array, and donor rows displayed in the panels.
+    """
+    _validate_stage2_plot_donors(donor_summary, donor_col, value_col)
+    _validate_stage2_plot_tests(tissue_tests)
+    return _plot_stage2_primary_impl(
+        donor_summary=donor_summary,
+        tissue_tests=tissue_tests,
+        tissue_order=tissue_order,
+        tissue_colors=tissue_colors,
+        method_config=method_config,
+        donor_col=donor_col,
+        value_col=value_col,
+        show_donor_labels=show_donor_labels,
+        random_state=random_state,
+        save=save,
+        dpi=dpi,
+    )
+
+
+def plot_stage2_scale_sensitivity(
+    donor_summary,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    methods=(
+        "Continuous MHCII kNN",
+        "Continuous MHCII radius",
+        "Balanced MHCII extremes",
+    ),
+    donor_col="donor_id",
+    value_col="donor_effect",
+    save=None,
+    dpi=300,
+):
+    """Plot descriptive donor-level Stage 2 effects across spatial scales.
+
+    Parameters
+    ----------
+    donor_summary
+        One-row-per-donor output from `summarize_stage2_by_donor_and_tissue`.
+    tissue_order
+        Tissue annotations and display order.
+    tissue_colors
+        Optional mapping from tissue annotation to macaron plot color.
+    methods
+        Ordered multiscale Stage 2 methods to include.
+    donor_col
+        Column containing biological donor identifiers, used for uniqueness checks.
+    value_col
+        Column containing donor-level effects to summarize.
+    save
+        Optional figure filename.
+    dpi
+        Resolution used when `save` is provided.
+
+    Returns
+    -------
+    fig, axes, summary : tuple
+        Matplotlib figure, axes array, and donor median/IQR table by method,
+        scale, and tissue.
+
+    Notes
+    -----
+    This is a descriptive sensitivity figure. Lines summarize donors; cells and
+    cores are not treated as independent replicates.
+    """
+    _validate_stage2_plot_donors(donor_summary, donor_col, value_col)
+    if tissue_colors is None:
+        tissue_colors = {
+            "A": "#E8928F",
+            "B": "#7FAED2",
+            "V": "#82BFA0",
+            "None": "#B8B8B8",
+        }
+
+    data = donor_summary.loc[
+        donor_summary["method"].isin(methods)
+        & donor_summary["tissue_annotation"].isin(tissue_order)
+    ].copy()
+    summary = (
+        data.groupby(
+            ["method", "scale_type", "scale", "tissue_annotation"],
+            observed=True,
+        )[value_col]
+        .agg(
+            median="median",
+            q25=lambda values: values.quantile(0.25),
+            q75=lambda values: values.quantile(0.75),
+            n_donors="count",
+        )
+        .reset_index()
+    )
+    available_methods = [
+        method for method in methods if method in summary["method"].unique()
+    ]
+    if not available_methods:
+        raise ValueError("No multiscale Stage 2 methods were found.")
+
+    fig, axes = plt.subplots(
+        1,
+        len(available_methods),
+        figsize=(5.0 * len(available_methods), 4.5),
+        squeeze=False,
+    )
+    axes = axes.ravel()
+    title_map = {
+        "Continuous MHCII kNN": "Continuous kNN exposure",
+        "Continuous MHCII radius": "Continuous radius exposure",
+        "Balanced MHCII extremes": "Balanced score extremes",
+    }
+    for ax, method in zip(axes, available_methods):
+        panel = summary.loc[summary["method"] == method].copy()
+        for tissue in tissue_order:
+            group = panel.loc[
+                panel["tissue_annotation"] == tissue
+            ].sort_values("scale")
+            if group.empty:
+                continue
+            color = tissue_colors.get(tissue, "#B8B8B8")
+            x = group["scale"].to_numpy(dtype=float)
+            median = group["median"].to_numpy(dtype=float)
+            q25 = group["q25"].to_numpy(dtype=float)
+            q75 = group["q75"].to_numpy(dtype=float)
+            ax.fill_between(
+                x, q25, q75, color=color, alpha=0.18, linewidth=0
+            )
+            ax.plot(
+                x,
+                median,
+                color=color,
+                marker="o",
+                markersize=6,
+                linewidth=1.8,
+                markeredgecolor="#303030",
+                markeredgewidth=0.55,
+                label=str(tissue),
+            )
+        ax.axhline(
+            0,
+            color="#777777",
+            linestyle=(0, (3, 3)),
+            linewidth=1,
+        )
+        scale_type = panel["scale_type"].iloc[0] if not panel.empty else ""
+        xlabel = (
+            "Number of nearest neighbors"
+            if scale_type == "k_neighbors"
+            else "Radius (µm)"
+        )
+        ax.set_xlabel(xlabel)
+        ax.set_ylabel(
+            "Median donor effect\nPositive = greater AT2 association"
+        )
+        ax.set_title(
+            title_map.get(method, method), fontsize=11, fontweight="bold"
+        )
+        ax.grid(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    handles = [
+        Line2D(
+            [0],
+            [0],
+            color=tissue_colors.get(tissue, "#B8B8B8"),
+            marker="o",
+            markeredgecolor="#303030",
+            linewidth=1.8,
+            label=str(tissue),
+        )
+        for tissue in tissue_order
+    ]
+    fig.legend(
+        handles=handles,
+        title="Tissue annotation",
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.03),
+        ncol=len(tissue_order),
+        frameon=False,
+    )
+    fig.suptitle(
+        "Sensitivity of the MHCII–AT2 relationship to neighborhood scale",
+        fontsize=13,
+        fontweight="bold",
+        y=1.10,
+    )
+    fig.tight_layout()
+    if save is not None:
+        fig.savefig(
+            save,
+            dpi=dpi,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+    return fig, axes, summary
+
+
+def _plot_stage2_primary_impl(
+    donor_summary,
+    tissue_tests,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    method_config=None,
+    donor_col="donor_id",
+    value_col="donor_effect",
+    show_donor_labels=False,
+    random_state=123,
+    save=None,
+    dpi=300,
+):
+    """
+    Plot the primary Stage 2 donor-level results.
+
+    Encoding
+    --------
+    Points:
+        Individual donors.
+
+    Diamond:
+        Median donor effect.
+
+    Horizontal interval:
+        Donor interquartile range.
+
+    Positive effect:
+        Higher MHCII score is associated with greater AT2 exposure
+        or shorter AT2 distance.
+
+    Returns
+    -------
+    fig, axes, plot_data
+    """
+    if tissue_colors is None:
+        tissue_colors = {
+            "A": "#E8928F",
+            "B": "#7FAED2",
+            "V": "#82BFA0",
+            "None": "#B8B8B8",
+        }
+
+    if method_config is None:
+        method_config = [
+            {
+                "method": "Continuous MHCII kNN",
+                "scale": 15,
+                "title": "kNN exposure",
+                "subtitle": "MHCII score vs AT2 fraction; k = 15",
+                "xlabel": (
+                    "Spearman ρ\n"
+                    "Positive = greater AT2 exposure"
+                ),
+                "primary": True,
+            },
+            {
+                "method": "Continuous MHCII radius",
+                "scale": 50,
+                "title": "Fixed-radius exposure",
+                "subtitle": "MHCII score vs AT2 fraction; 50 µm",
+                "xlabel": (
+                    "Spearman ρ\n"
+                    "Positive = greater AT2 exposure"
+                ),
+                "primary": True,
+            },
+            {
+                "method": "Continuous MHCII nearest AT2",
+                "scale": 1,
+                "title": "Nearest-AT2 proximity",
+                "subtitle": "Effect = −ρ(score, nearest-AT2 distance)",
+                "xlabel": (
+                    "Proximity effect (−ρ)\n"
+                    "Positive = closer to AT2"
+                ),
+                "primary": True,
+            },
+            {
+                "method": "Balanced MHCII extremes",
+                "scale": 50,
+                "title": "Balanced score extremes",
+                "subtitle": "Top minus bottom MHCII-score AMs; 50 µm",
+                "xlabel": (
+                    "Difference in AT2 fraction\n"
+                    "Positive = higher in MHCII-high AMs"
+                ),
+                "primary": False,
+            },
+        ]
+
+    required_donor_columns = {
+        "method",
+        "scale",
+        "tissue_annotation",
+        donor_col,
+        value_col,
+    }
+
+    missing = required_donor_columns.difference(
+        donor_summary.columns
+    )
+
+    if missing:
+        raise KeyError(
+            f"Missing donor_summary columns: {sorted(missing)}"
+        )
+
+    donor_summary = donor_summary.copy()
+    tissue_tests = tissue_tests.copy()
+
+    available_methods = set(
+        donor_summary["method"]
+        .dropna()
+        .astype(str)
+        .unique()
+    )
+
+    resolved_config = [
+        configuration
+        for configuration in method_config
+        if configuration["method"] in available_methods
+    ]
+
+    if not resolved_config:
+        raise ValueError(
+            "None of the configured Stage 2 methods were found. "
+            f"Available methods are: {sorted(available_methods)}"
+        )
+
+    n_panels = len(resolved_config)
+    ncols = 2
+    nrows = int(np.ceil(n_panels / ncols))
+
+    fig, axes = plt.subplots(
+        nrows=nrows,
+        ncols=ncols,
+        figsize=(11.5, 4.4 * nrows),
+        squeeze=False,
+    )
+
+    axes_flat = axes.ravel()
+    rng = np.random.default_rng(random_state)
+
+    plotted_tables = []
+
+    for panel_index, configuration in enumerate(
+        resolved_config
+    ):
+        ax = axes_flat[panel_index]
+
+        method = configuration["method"]
+        selected_scale = float(
+            configuration["scale"]
+        )
+
+        panel_data = donor_summary.loc[
+            (donor_summary["method"] == method) &
+            np.isclose(
+                donor_summary["scale"].astype(float),
+                selected_scale,
+            ) &
+            donor_summary["tissue_annotation"].isin(
+                tissue_order
+            )
+        ].copy()
+
+        if panel_data.empty:
+            ax.set_visible(False)
+            continue
+
+        plotted_tables.append(panel_data)
+
+        available_tissues = [
+            tissue
+            for tissue in tissue_order
+            if (
+                panel_data["tissue_annotation"]
+                .astype(str)
+                .eq(str(tissue))
+                .any()
+            )
+        ]
+
+        y_positions = np.arange(
+            len(available_tissues)
+        )[::-1]
+
+        all_effects = []
+        y_labels = []
+
+        for y, tissue in zip(
+            y_positions,
+            available_tissues,
+        ):
+            tissue_data = panel_data.loc[
+                panel_data["tissue_annotation"]
+                .astype(str)
+                .eq(str(tissue))
+            ].copy()
+
+            values = (
+                tissue_data[value_col]
+                .dropna()
+                .astype(float)
+                .to_numpy()
+            )
+
+            all_effects.extend(values.tolist())
+
+            color = tissue_colors.get(
+                tissue,
+                "#B8B8B8",
+            )
+
+            jitter = rng.uniform(
+                -0.13,
+                0.13,
+                size=len(values),
+            )
+
+            ax.scatter(
+                values,
+                y + jitter,
+                s=42,
+                color=color,
+                edgecolor="#303030",
+                linewidth=0.55,
+                alpha=0.82,
+                zorder=3,
+            )
+
+            if len(values) > 0:
+                median = float(
+                    np.median(values)
+                )
+
+                q25, q75 = np.quantile(
+                    values,
+                    [0.25, 0.75],
+                )
+
+                ax.plot(
+                    [q25, q75],
+                    [y, y],
+                    color="#303030",
+                    linewidth=2.2,
+                    solid_capstyle="round",
+                    zorder=4,
+                )
+
+                ax.scatter(
+                    median,
+                    y,
+                    marker="D",
+                    s=72,
+                    color=color,
+                    edgecolor="#151515",
+                    linewidth=1.1,
+                    zorder=5,
+                )
+
+            if show_donor_labels:
+                for _, row in tissue_data.iterrows():
+                    if pd.notna(row[value_col]):
+                        ax.text(
+                            row[value_col],
+                            y + rng.uniform(-0.11, 0.11),
+                            f" {row[donor_col]}",
+                            fontsize=6.5,
+                            va="center",
+                            color="#444444",
+                        )
+
+            test_match = tissue_tests.loc[
+                (tissue_tests["method"] == method) &
+                np.isclose(
+                    tissue_tests["scale"].astype(float),
+                    selected_scale,
+                ) &
+                tissue_tests["tissue_annotation"]
+                .astype(str)
+                .eq(str(tissue))
+            ]
+
+            statistical_text = ""
+
+            if not test_match.empty:
+                if (
+                    "FDR" in test_match.columns and
+                    test_match["FDR"].notna().any()
+                ):
+                    q_value = float(
+                        test_match["FDR"]
+                        .dropna()
+                        .iloc[0]
+                    )
+
+                    statistical_text = (
+                        f"{_stage2_significance_label(q_value)}  "
+                        f"q={q_value:.3g}"
+                    )
+
+                elif (
+                    "p_value" in test_match.columns and
+                    test_match["p_value"].notna().any()
+                ):
+                    p_value = float(
+                        test_match["p_value"]
+                        .dropna()
+                        .iloc[0]
+                    )
+
+                    statistical_text = (
+                        f"{_stage2_significance_label(p_value)}  "
+                        f"p={p_value:.3g}"
+                    )
+
+            if statistical_text:
+                ax.text(
+                    0.985,
+                    y,
+                    statistical_text,
+                    transform=ax.get_yaxis_transform(),
+                    ha="right",
+                    va="center",
+                    fontsize=8.3,
+                    color="#303030",
+                )
+
+            y_labels.append(
+                f"{tissue}   (n={len(values)})"
+            )
+
+        ax.axvline(
+            0,
+            color="#777777",
+            linestyle=(0, (3, 3)),
+            linewidth=1.0,
+            zorder=1,
+        )
+
+        if all_effects:
+            maximum = max(
+                np.max(np.abs(all_effects)),
+                0.025,
+            )
+
+            ax.set_xlim(
+                -1.25 * maximum,
+                1.60 * maximum,
+            )
+
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(
+            y_labels,
+            fontsize=9,
+        )
+
+        ax.set_xlabel(
+            configuration["xlabel"],
+            fontsize=9.5,
+        )
+
+        ax.set_title(
+            configuration["title"],
+            fontsize=12,
+            fontweight="bold",
+            pad=19,
+        )
+
+        subtitle_color = (
+            "#444444"
+            if configuration["primary"]
+            else "#777777"
+        )
+
+        ax.text(
+            0.5,
+            1.015,
+            configuration["subtitle"],
+            transform=ax.transAxes,
+            ha="center",
+            va="bottom",
+            fontsize=8.7,
+            color=subtitle_color,
+        )
+
+        if not configuration["primary"]:
+            ax.text(
+                0.02,
+                0.03,
+                "Secondary cutoff-based analysis",
+                transform=ax.transAxes,
+                ha="left",
+                va="bottom",
+                fontsize=7.5,
+                color="#777777",
+                style="italic",
+            )
+
+        ax.grid(False)
+
+        ax.tick_params(
+            axis="both",
+            length=3,
+            width=0.8,
+            color="#444444",
+        )
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#333333")
+        ax.spines["bottom"].set_color("#333333")
+
+    for panel_index in range(
+        n_panels,
+        len(axes_flat),
+    ):
+        axes_flat[panel_index].set_visible(False)
+
+    legend_handles = [
+        Line2D(
+            [0],
+            [0],
+            marker="o",
+            linestyle="none",
+            markerfacecolor=tissue_colors.get(
+                tissue,
+                "#B8B8B8",
+            ),
+            markeredgecolor="#303030",
+            markeredgewidth=0.6,
+            markersize=7,
+            label=str(tissue),
+        )
+        for tissue in tissue_order
+    ]
+
+    fig.legend(
+        handles=legend_handles,
+        title="Tissue annotation",
+        loc="upper center",
+        bbox_to_anchor=(0.5, 1.005),
+        ncol=len(tissue_order),
+        frameon=False,
+    )
+
+    fig.suptitle(
+        "Relationship between AM MHCII state and AT2 proximity",
+        fontsize=14,
+        fontweight="bold",
+        y=1.04,
+    )
+
+    fig.tight_layout(
+        rect=(0, 0, 1, 0.965)
+    )
+
+    if save is not None:
+        fig.savefig(
+            save,
+            dpi=dpi,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+
+    plot_data = (
+        pd.concat(
+            plotted_tables,
+            ignore_index=True,
+        )
+        if plotted_tables
+        else pd.DataFrame()
+    )
+
+    return fig, axes, plot_data
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
@@ -10239,6 +11016,7 @@ __all__ = [
     "plot_am_at2_spatial", "plot_focus_umap", "plot_full_umap",
     "plot_knn_niche_continuum",
     "plot_stage1A_niche_dotmap", "plot_stage1B_primary",
+    "plot_stage2_primary", "plot_stage2_scale_sensitivity",
     "plot_macrophage_pct_by_tissue", "plot_metadata_summary",
     "plot_marker_dotplot", "plot_nhood_enrichment_donor_tissue",
     "plot_program_umap", "plot_radius_core_correlations",

@@ -134,6 +134,8 @@ returns, errors, and relevant scientific interpretation.
 | `plot_knn_niche_continuum` | Plots tissue-stratified donor-level k-nearest-neighbor continuum correlations and FDR significance labels. |
 | `plot_stage1A_niche_dotmap` | Creates one donor-level niche-discovery dot map per focal cell type. Color is median donor effect, size is donor-level FDR evidence, and outlines mark the selected FDR threshold. |
 | `plot_stage1B_primary` | Filters full multitype summaries to the unordered AM–AT2 pair, then shows individual donor effects, medians, interquartile ranges, and donor-level tissue-test annotations for selected Stage 1 methods and scales. Both directional orientations are retained. |
+| `plot_stage2_primary` | Shows donor-level effects, median diamonds, donor IQRs, and donor-level tissue-test annotations for prespecified continuous kNN, radius, and nearest-AT2 analyses plus a clearly marked secondary balanced-tail panel. Duplicate donor or tissue-test rows are rejected before plotting. |
+| `plot_stage2_scale_sensitivity` | Displays the median and IQR of donor effects across k or radius values by tissue. This is a descriptive sensitivity plot based on unique donor rows, not a cell- or core-level inferential analysis. |
 | `save_figure` | Saves a figure as matching PNG and PDF files. |
 
 Stage 2 uses the continuous MHCII score as the primary exposure. Balanced

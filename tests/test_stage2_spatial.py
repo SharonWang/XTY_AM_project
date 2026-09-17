@@ -96,6 +96,58 @@ def _stage1_plot_tables():
     return donor_summary, tissue_tests
 
 
+def _stage2_plot_tables():
+    """Return donor and tissue summaries spanning primary and sensitivity plots."""
+    method_scales = {
+        "Continuous MHCII kNN": (5.0, 15.0),
+        "Continuous MHCII radius": (25.0, 50.0),
+        "Continuous MHCII nearest AT2": (1.0,),
+        "Balanced MHCII extremes": (25.0, 50.0),
+    }
+    donor_rows = []
+    test_rows = []
+    for method, scales in method_scales.items():
+        scale_type = (
+            "k_neighbors"
+            if method == "Continuous MHCII kNN"
+            else "nearest_target"
+            if method == "Continuous MHCII nearest AT2"
+            else "radius_um"
+        )
+        effect_type = (
+            "difference" if method == "Balanced MHCII extremes" else "correlation"
+        )
+        for scale in scales:
+            for donor_index, donor in enumerate(("D1", "D2", "D3"), start=1):
+                donor_rows.append(
+                    {
+                        "method": method,
+                        "direction": "MHCII score → AT2 association",
+                        "effect_type": effect_type,
+                        "scale_type": scale_type,
+                        "scale": scale,
+                        "donor_id": donor,
+                        "tissue_annotation": "A",
+                        "donor_effect": 0.1 * donor_index + 0.001 * scale,
+                    }
+                )
+            test_rows.append(
+                {
+                    "method": method,
+                    "direction": "MHCII score → AT2 association",
+                    "effect_type": effect_type,
+                    "scale_type": scale_type,
+                    "scale": scale,
+                    "tissue_annotation": "A",
+                    "n_donors": 3,
+                    "median_effect": 0.2 + 0.001 * scale,
+                    "p_value": 0.02,
+                    "FDR": 0.03,
+                }
+            )
+    return pd.DataFrame(donor_rows), pd.DataFrame(test_rows)
+
+
 def test_stage1_plot_functions_return_figures_and_plotted_tables():
     donor_summary, tissue_tests = _stage1_plot_tables()
     config_a = [
@@ -150,6 +202,74 @@ def test_stage1_plot_functions_validate_required_columns():
         pipeline.plot_stage1A_niche_dotmap(pd.DataFrame({"method": []}))
     with pytest.raises(KeyError, match="Missing donor_summary columns"):
         pipeline.plot_stage1B_primary(pd.DataFrame(), pd.DataFrame())
+
+
+def test_stage2_primary_returns_donor_rows_and_uses_standard_significance():
+    donor_summary, tissue_tests = _stage2_plot_tables()
+    method_config = [
+        {
+            "method": "Continuous MHCII radius",
+            "scale": 50,
+            "title": "Fixed-radius exposure",
+            "subtitle": "MHCII score vs AT2 fraction; 50 µm",
+            "xlabel": "Spearman ρ",
+            "primary": True,
+        }
+    ]
+    fig, axes, plot_data = pipeline.plot_stage2_primary(
+        donor_summary,
+        tissue_tests,
+        tissue_order=("A",),
+        method_config=method_config,
+    )
+    assert fig is not None
+    assert axes.size == 2
+    assert len(plot_data) == 3
+    assert set(plot_data["method"]) == {"Continuous MHCII radius"}
+    assert pipeline._stage2_significance_label(0.0005) == "***"
+    assert pipeline._stage2_significance_label(0.00005) == "****"
+    plt.close("all")
+
+
+def test_stage2_scale_sensitivity_summarizes_unique_donors(tmp_path):
+    donor_summary, _ = _stage2_plot_tables()
+    output = tmp_path / "stage2_scale_sensitivity.pdf"
+    fig, axes, summary = pipeline.plot_stage2_scale_sensitivity(
+        donor_summary,
+        tissue_order=("A",),
+        methods=("Continuous MHCII radius",),
+        save=output,
+    )
+    assert fig is not None
+    assert axes.size == 1
+    assert set(summary["scale"]) == {25.0, 50.0}
+    assert set(summary["n_donors"]) == {3}
+    assert output.exists()
+    plt.close("all")
+
+
+def test_stage2_plots_reject_missing_columns_and_duplicate_donor_rows():
+    donor_summary, tissue_tests = _stage2_plot_tables()
+    duplicate_donors = pd.concat(
+        [donor_summary, donor_summary.iloc[[0]]],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="duplicate donor"):
+        pipeline.plot_stage2_primary(duplicate_donors, tissue_tests)
+    with pytest.raises(ValueError, match="duplicate donor"):
+        pipeline.plot_stage2_scale_sensitivity(duplicate_donors)
+    with pytest.raises(KeyError, match="Missing donor_summary columns"):
+        pipeline.plot_stage2_scale_sensitivity(pd.DataFrame({"method": []}))
+
+
+def test_stage2_primary_rejects_ambiguous_tissue_test_rows():
+    donor_summary, tissue_tests = _stage2_plot_tables()
+    duplicate_tests = pd.concat(
+        [tissue_tests, tissue_tests.iloc[[0]]],
+        ignore_index=True,
+    )
+    with pytest.raises(ValueError, match="duplicate tissue-test"):
+        pipeline.plot_stage2_primary(donor_summary, duplicate_tests)
 
 
 def test_stage2_continuous_and_nearest_effects_have_consistent_direction():
@@ -429,6 +549,8 @@ def test_new_public_functions_have_numpy_docstrings_and_exports():
     names = (
         "plot_stage1A_niche_dotmap",
         "plot_stage1B_primary",
+        "plot_stage2_primary",
+        "plot_stage2_scale_sensitivity",
         "run_spatial_function_multicore",
         "calculate_stage2_balanced_extremes_by_core",
         "calculate_stage2_knn_continuum_by_core",
