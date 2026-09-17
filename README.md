@@ -126,13 +126,13 @@ signalling.
 
 | Function | Description |
 |---|---|
-| `assign_balanced_mhcii_extremes` | Assigns equal MHCII-high and MHCII-low AM tails within each core for secondary CellChat contrasts. If either cutoff would split tied scores, all scored AMs in that core remain `Ambiguous`; underpowered or unscored cells remain `Unassigned`. |
+| `assign_balanced_mhcii_extremes` | Assigns equal MHCII-high and MHCII-low AM tails within each core for secondary CellChat contrasts. If either cutoff would split tied scores, all scored AMs in that core remain `Ambiguous`; scored AMs in underpowered cores are also `Ambiguous`, while unscored and non-AM cells remain `Unassigned`. |
 | `add_cellchat_groups` | Creates `CellType_CCC`: MHCII AM tails and middle/unassigned AMs receive distinct labels, while every non-AM cell type is preserved. |
-| `export_spatial_cellchat_inputs` | Validates unique cell/gene IDs, complete metadata, finite two-dimensional coordinates, and finite nonnegative expression; then exports a compressed genes-by-cells Matrix Market matrix, genes, cells, metadata, coordinates, and JSON manifest. |
+| `export_spatial_cellchat_inputs` | Requires an explicit normalized/log1p expression declaration and coordinate-unit contract, validates unique cell/gene IDs, complete metadata, finite micrometre-converted coordinates, and finite nonnegative expression, then exports compressed sparse inputs and a JSON manifest recording scale and units. Raw counts and unscaled non-micrometre coordinates are rejected. |
 | `audit_lr_panel` | Normalizes ligand/receptor symbols, reports panel coverage, and distinguishes simple single-gene pairs from unsupported complex notation such as underscore-delimited receptor complexes. |
 | `radius_weighted_mean` | Calculates uniform or Gaussian-weighted local target expression and neighbor counts inside a physical radius. |
 | `calculate_lr_for_core_arrays` | For one core, correlates the continuous AM MHCII score with AM-gene expression multiplied by local AT2 partner-gene expression in both AM-to-AT2 and AT2-to-AM directions. Reports prevalence, spatial coverage, permutation P values, and overlap of the AM-side gene with the MHCII signature. |
-| `calculate_continuous_spatial_lr` | Runs the bounded array calculation by core and radius without copying full AnnData objects to workers. Seeds depend on stable core/pair identity; diagnostic FDR is controlled within core × direction × radius across LR pairs. |
+| `calculate_continuous_spatial_lr` | Runs the bounded array calculation by core and radius without copying full AnnData objects to workers. It requires complete core/donor/tissue provenance and a positive finite coordinate scale, supports serial, process (`loky`), or thread execution, and derives seeds from stable core/pair identity. Diagnostic FDR is controlled within core × direction × radius across LR pairs. |
 | `summarize_lr_by_donor` | Combines valid core correlations within donor using an equal-core Fisher-z mean, so donors with larger cores do not receive extra biological weight. |
 | `summarise_lr_by_donor` | British-spelling alias of `summarize_lr_by_donor`. |
 | `test_lr_across_donors` | Performs two-sided one-sample Wilcoxon tests on independent donor correlations and controls FDR within tissue × direction × radius across LR pairs. |

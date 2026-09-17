@@ -11099,7 +11099,8 @@ def add_cellchat_groups(
 
 
 def export_spatial_cellchat_inputs(
-    adata, output_dir, layer=None, spatial_key="spatial",
+    adata, output_dir, *, expression_scale, coordinate_units,
+    coordinate_scale_to_um=None, layer=None, spatial_key="spatial",
     metadata_columns=("CellType_CCC", "CellType_refined", "core_id", "donor_id",
                       "tissue_annotation"),
 ):
@@ -11111,6 +11112,15 @@ def export_spatial_cellchat_inputs(
         AnnData containing nonnegative expression and spatial metadata.
     output_dir
         Directory receiving compressed Matrix Market and metadata files.
+    expression_scale
+        Explicit expression contract. Accepted values are ``"normalized"``
+        and ``"log1p_normalized"``; raw counts are rejected for this export.
+    coordinate_units
+        Units of the stored coordinates, for example ``"micrometre"`` or
+        ``"pixel"``. Non-micrometre coordinates require an explicit scale.
+    coordinate_scale_to_um
+        Positive multiplier converting stored coordinates to micrometres.
+        Defaults to one only when ``coordinate_units`` is micrometres.
     layer
         Optional expression layer; ``None`` exports ``adata.X``.
     spatial_key
@@ -11124,6 +11134,25 @@ def export_spatial_cellchat_inputs(
         Paths named ``expression``, ``genes``, ``cells``, ``metadata``,
         ``coordinates``, and ``manifest``.
     """
+    accepted_scales = {"normalized", "log1p_normalized"}
+    expression_scale = str(expression_scale).strip().lower()
+    if expression_scale not in accepted_scales:
+        raise ValueError(
+            "expression_scale must be 'normalized' or 'log1p_normalized'; "
+            "raw counts are not valid Spatial CellChat input."
+        )
+    coordinate_units = str(coordinate_units).strip().lower()
+    micrometre_units = {"micrometre", "micrometres", "micrometer", "micrometers", "um", "µm"}
+    if coordinate_scale_to_um is None:
+        if coordinate_units not in micrometre_units:
+            raise ValueError(
+                "coordinate_scale_to_um is required when coordinate_units "
+                "are not micrometres."
+            )
+        coordinate_scale_to_um = 1.0
+    if not np.isfinite(coordinate_scale_to_um) or float(coordinate_scale_to_um) <= 0:
+        raise ValueError("coordinate_scale_to_um must be positive and finite.")
+    coordinate_scale_to_um = float(coordinate_scale_to_um)
     if not adata.obs_names.is_unique or not adata.var_names.is_unique:
         raise ValueError("Cell and gene names must be unique before export.")
     missing = [column for column in metadata_columns if column not in adata.obs]
@@ -11164,12 +11193,17 @@ def export_spatial_cellchat_inputs(
     metadata = adata.obs.loc[:, list(metadata_columns)].copy()
     metadata.insert(0, "cell_id", adata.obs_names.astype(str))
     metadata.to_csv(paths["metadata"], index=False, compression="gzip")
-    pd.DataFrame({"cell_id": adata.obs_names.astype(str), "x_um": coordinates[:, 0],
-                  "y_um": coordinates[:, 1]}).to_csv(
+    coordinates_um = coordinates[:, :2] * coordinate_scale_to_um
+    pd.DataFrame({"cell_id": adata.obs_names.astype(str), "x_um": coordinates_um[:, 0],
+                  "y_um": coordinates_um[:, 1]}).to_csv(
         paths["coordinates"], index=False, compression="gzip")
     manifest = {"n_cells": int(adata.n_obs), "n_genes": int(adata.n_vars),
                 "nnz": int(expression.nnz), "layer": "X" if layer is None else str(layer),
+                "expression_scale": expression_scale,
                 "spatial_key": spatial_key, "expression_orientation": "genes_by_cells",
+                "input_coordinate_units": coordinate_units,
+                "coordinate_scale_to_um": coordinate_scale_to_um,
+                "output_coordinate_units": "micrometre",
                 "metadata_columns": list(metadata_columns)}
     paths["manifest"].write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
     return paths
@@ -11417,7 +11451,7 @@ def calculate_continuous_spatial_lr(
     am_labels=("AM", "Alveolar Macrophage"), at2_labels=("AT2",), min_am=20,
     min_at2=10, n_permutations=999, random_state=123, n_jobs=1, verbose=0,
     coordinate_scale=1.0, kernel="uniform", sigma=None, mhcii_signature_genes=None,
-    min_pct_expressing=0.0,
+    min_pct_expressing=0.0, parallel_backend_name="loky",
 ):
     """Run exploratory continuous spatial LR co-expression analysis by core.
 
@@ -11449,6 +11483,9 @@ def calculate_continuous_spatial_lr(
         Score genes reported as circularity flags.
     min_pct_expressing
         Minimum expression prevalence on each pair side.
+    parallel_backend_name
+        ``"loky"`` for process workers or ``"threading"`` for thread workers.
+        This is ignored when ``n_jobs=1``.
 
     Returns
     -------
@@ -11466,6 +11503,15 @@ def calculate_continuous_spatial_lr(
     missing = [column for column in required if column not in adata.obs]
     if missing:
         raise KeyError(f"Missing adata.obs columns: {missing}")
+    if adata.obs.loc[:, [core_col, donor_col, tissue_col]].isna().any().any():
+        raise ValueError(
+            "Cells contain missing core/donor/tissue provenance; complete "
+            "metadata is required before spatial LR analysis."
+        )
+    if not np.isfinite(coordinate_scale) or float(coordinate_scale) <= 0:
+        raise ValueError("coordinate_scale must be positive and finite.")
+    if parallel_backend_name not in {"loky", "threading"}:
+        raise ValueError("parallel_backend_name must be 'loky' or 'threading'.")
     if spatial_key not in adata.obsm:
         raise KeyError(f"{spatial_key!r} is absent from adata.obsm.")
     coordinates = np.asarray(adata.obsm[spatial_key], dtype=float)
@@ -11525,7 +11571,12 @@ def calculate_continuous_spatial_lr(
             from joblib import Parallel, delayed, parallel_backend
         except ImportError as error:
             raise ImportError("Parallel LR analysis requires joblib.") from error
-        with parallel_backend("loky", inner_max_num_threads=1):
+        backend_options = (
+            {"inner_max_num_threads": 1}
+            if parallel_backend_name == "loky"
+            else {}
+        )
+        with parallel_backend(parallel_backend_name, **backend_options):
             results = Parallel(n_jobs=min(n_jobs, max(len(tasks), 1)), verbose=verbose)(
                 delayed(_calculate_lr_task)(task) for task in tasks)
     results = [result for result in results if not result.empty]

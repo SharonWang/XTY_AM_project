@@ -107,7 +107,12 @@ def test_add_cellchat_groups_preserves_non_am_and_separates_unassigned():
 def test_cellchat_export_writes_sparse_inputs_and_manifest(tmp_path):
     adata = _lr_adata(two_cores=False)
     pipeline.add_cellchat_groups(adata)
-    report = pipeline.export_spatial_cellchat_inputs(adata, tmp_path)
+    report = pipeline.export_spatial_cellchat_inputs(
+        adata,
+        tmp_path,
+        expression_scale="log1p_normalized",
+        coordinate_units="micrometre",
+    )
     expected = {
         "expression", "genes", "cells", "metadata", "coordinates", "manifest"
     }
@@ -120,6 +125,28 @@ def test_cellchat_export_writes_sparse_inputs_and_manifest(tmp_path):
     assert manifest["n_cells"] == adata.n_obs
     assert manifest["n_genes"] == adata.n_vars
     assert manifest["expression_orientation"] == "genes_by_cells"
+    assert manifest["expression_scale"] == "log1p_normalized"
+    assert manifest["input_coordinate_units"] == "micrometre"
+    assert manifest["coordinate_scale_to_um"] == 1.0
+
+
+def test_cellchat_export_requires_declared_scale_and_coordinate_conversion(tmp_path):
+    adata = _lr_adata(two_cores=False)
+    pipeline.add_cellchat_groups(adata)
+    with pytest.raises(ValueError, match="expression_scale"):
+        pipeline.export_spatial_cellchat_inputs(
+            adata,
+            tmp_path / "counts",
+            expression_scale="raw_counts",
+            coordinate_units="micrometre",
+        )
+    with pytest.raises(ValueError, match="coordinate_scale_to_um"):
+        pipeline.export_spatial_cellchat_inputs(
+            adata,
+            tmp_path / "pixels",
+            expression_scale="log1p_normalized",
+            coordinate_units="pixel",
+        )
 
 
 def test_cellchat_export_rejects_negative_expression_and_missing_metadata(tmp_path):
@@ -127,10 +154,20 @@ def test_cellchat_export_rejects_negative_expression_and_missing_metadata(tmp_pa
     pipeline.add_cellchat_groups(adata)
     adata.X[0, 0] = -1
     with pytest.raises(ValueError, match="negative"):
-        pipeline.export_spatial_cellchat_inputs(adata, tmp_path / "negative")
+        pipeline.export_spatial_cellchat_inputs(
+            adata,
+            tmp_path / "negative",
+            expression_scale="log1p_normalized",
+            coordinate_units="micrometre",
+        )
     adata = _lr_adata(two_cores=False)
     with pytest.raises(KeyError, match="metadata"):
-        pipeline.export_spatial_cellchat_inputs(adata, tmp_path / "missing")
+        pipeline.export_spatial_cellchat_inputs(
+            adata,
+            tmp_path / "missing",
+            expression_scale="log1p_normalized",
+            coordinate_units="micrometre",
+        )
 
 
 def test_lr_panel_audit_requires_simple_measured_pairs():
@@ -221,6 +258,45 @@ def test_all_core_lr_is_order_stable_and_fdr_is_within_core_family():
     testable = original["rho"].notna()
     assert original.loc[testable, "core_FDR"].between(0, 1).all()
     assert original.loc[~testable, "core_FDR"].isna().all()
+
+
+def test_all_core_lr_rejects_missing_provenance_and_invalid_coordinate_scale():
+    pairs = pd.DataFrame({"ligand": ["LIG"], "receptor": ["REC"]})
+    adata = _lr_adata(two_cores=False)
+    adata.obs.loc[adata.obs.index[0], "donor_id"] = pd.NA
+    with pytest.raises(ValueError, match="missing core/donor/tissue"):
+        pipeline.calculate_continuous_spatial_lr(
+            adata, pairs, radii=(16,), min_am=4, min_at2=3,
+            n_permutations=0,
+        )
+    adata = _lr_adata(two_cores=False)
+    with pytest.raises(ValueError, match="coordinate_scale"):
+        pipeline.calculate_continuous_spatial_lr(
+            adata, pairs, radii=(16,), min_am=4, min_at2=3,
+            n_permutations=0, coordinate_scale=0,
+        )
+
+
+def test_all_core_lr_thread_backend_matches_serial():
+    adata = _lr_adata(two_cores=True)
+    pairs = pd.DataFrame({"ligand": ["LIG"], "receptor": ["REC"]})
+    kwargs = dict(
+        lr_pairs=pairs, radii=(16,), min_am=4, min_at2=3,
+        n_permutations=9, random_state=17,
+    )
+    serial = pipeline.calculate_continuous_spatial_lr(adata, n_jobs=1, **kwargs)
+    threaded = pipeline.calculate_continuous_spatial_lr(
+        adata, n_jobs=2, parallel_backend_name="threading", **kwargs
+    )
+    columns = [
+        "core_id", "direction", "ligand", "receptor", "radius_um",
+        "rho", "empirical_p", "core_FDR",
+    ]
+    sort_columns = columns[:5]
+    pd.testing.assert_frame_equal(
+        serial[columns].sort_values(sort_columns).reset_index(drop=True),
+        threaded[columns].sort_values(sort_columns).reset_index(drop=True),
+    )
 
 
 def test_lr_donor_summary_equal_weights_cores_and_tests_donors():
