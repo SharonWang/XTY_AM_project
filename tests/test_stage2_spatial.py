@@ -124,6 +124,14 @@ def test_stage1_plot_functions_return_figures_and_plotted_tables():
             "subtitle": "Cells within 50 µm",
         }
     ]
+    decoy_donors = donor_summary.copy()
+    decoy_donors["direction"] = "AM → Fibroblast"
+    decoy_donors["target_type"] = "Fibroblast"
+    donor_summary = pd.concat([donor_summary, decoy_donors], ignore_index=True)
+    decoy_test = tissue_tests.copy()
+    decoy_test["direction"] = "AM → Fibroblast"
+    decoy_test["target_type"] = "Fibroblast"
+    tissue_tests = pd.concat([tissue_tests, decoy_test], ignore_index=True)
     fig, plot_axes, plot_data = pipeline.plot_stage1B_primary(
         donor_summary,
         tissue_tests,
@@ -133,6 +141,7 @@ def test_stage1_plot_functions_return_figures_and_plotted_tables():
     assert fig is not None
     assert plot_axes.size == 2
     assert len(plot_data) == 3
+    assert set(plot_data["target_type"]) == {"AT2"}
     plt.close("all")
 
 
@@ -271,6 +280,52 @@ def test_spatial_multicore_runner_is_reproducible_across_worker_counts():
             _stage2_adata(),
             n_jobs=0,
         )
+
+
+def test_spatial_multicore_seed_is_stable_by_core_identity():
+    """Reordering or subsetting cores must not alter a retained core's null draw."""
+    adata = _stage2_adata(two_cores=True)
+    kwargs = dict(
+        radii=(1,),
+        min_am_cells=6,
+        min_at2_cells=3,
+        n_permutations=19,
+        verbose=0,
+    )
+    original = pipeline.run_spatial_function_multicore(
+        pipeline.calculate_stage2_radius_continuum_by_core,
+        adata,
+        n_jobs=1,
+        random_state=42,
+        **kwargs,
+    )
+    reverse_order = np.r_[
+        np.flatnonzero(adata.obs["core_id"].eq("C2")),
+        np.flatnonzero(adata.obs["core_id"].eq("C1")),
+    ]
+    reordered = pipeline.run_spatial_function_multicore(
+        pipeline.calculate_stage2_radius_continuum_by_core,
+        adata[reverse_order].copy(),
+        n_jobs=1,
+        random_state=42,
+        **kwargs,
+    )
+    c1_only = pipeline.run_spatial_function_multicore(
+        pipeline.calculate_stage2_radius_continuum_by_core,
+        adata[adata.obs["core_id"].eq("C1")].copy(),
+        n_jobs=1,
+        random_state=42,
+        **kwargs,
+    )
+    columns = ["core_id", "null_mean", "zscore", "p_association", "p_two_sided"]
+    pd.testing.assert_frame_equal(
+        original[columns].sort_values("core_id").reset_index(drop=True),
+        reordered[columns].sort_values("core_id").reset_index(drop=True),
+    )
+    pd.testing.assert_frame_equal(
+        original.loc[original["core_id"].eq("C1"), columns].reset_index(drop=True),
+        c1_only[columns].reset_index(drop=True),
+    )
 
 
 def test_stage2_multicore_wrapper_matches_generic_runner():

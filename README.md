@@ -105,7 +105,7 @@ returns, errors, and relevant scientific interpretation.
 | `calculate_multitype_radius_niche_by_core` | Tests directional target-cell fractions in fixed-radius focal-cell neighborhoods and reports target exposure and empty-neighborhood diagnostics. |
 | `calculate_multitype_nearest_distance_by_core` | Tests directional median nearest-target distances against within-core target-label randomization; positive effects consistently indicate closer-than-expected targets. |
 | `summarize_stage1_by_donor_and_tissue` | Averages core effects within donor and tissue, then performs one-sided donor-level Wilcoxon tests with FDR correction across target types. |
-| `run_spatial_function_multicore` | Runs a supported core-level spatial function with reproducible per-core seeds while passing only required metadata and spatial coordinates to workers, rather than copying the expression matrix. |
+| `run_spatial_function_multicore` | Runs a supported core-level spatial function with seeds derived from the master seed and stable core identity, so core order/subsetting does not change a retained core's null draws. Only required metadata and spatial coordinates are passed to workers rather than copying the expression matrix. |
 | `calculate_stage2_balanced_extremes_by_core` | Compares local AT2 fractions between equal-sized high- and low-MHCII-score AM tails within each core and radius. Tied score boundaries are omitted rather than split arbitrarily, and AMs without any neighbor at that radius are excluded. |
 | `calculate_stage2_knn_continuum_by_core` | Correlates the continuous AM MHCII score with the fraction of k nearest cells that are AT2, using within-core score permutations. |
 | `calculate_stage2_radius_continuum_by_core` | Correlates the continuous AM MHCII score with fixed-radius AT2 fraction. It reports how many AMs were analyzed or excluded because their radius contained no measured cells. |
@@ -133,7 +133,7 @@ returns, errors, and relevant scientific interpretation.
 | `plot_radius_core_correlations` | Plots core-level score-versus-radius-neighborhood correlations, colored by tissue, with median summaries. |
 | `plot_knn_niche_continuum` | Plots tissue-stratified donor-level k-nearest-neighbor continuum correlations and FDR significance labels. |
 | `plot_stage1A_niche_dotmap` | Creates one donor-level niche-discovery dot map per focal cell type. Color is median donor effect, size is donor-level FDR evidence, and outlines mark the selected FDR threshold. |
-| `plot_stage1B_primary` | Shows individual donor AM–AT2 effects, medians, interquartile ranges, and donor-level tissue-test annotations for selected Stage 1 methods and scales. |
+| `plot_stage1B_primary` | Filters full multitype summaries to the unordered AM–AT2 pair, then shows individual donor effects, medians, interquartile ranges, and donor-level tissue-test annotations for selected Stage 1 methods and scales. Both directional orientations are retained. |
 | `save_figure` | Saves a figure as matching PNG and PDF files. |
 
 Stage 2 uses the continuous MHCII score as the primary exposure. Balanced

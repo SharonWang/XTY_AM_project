@@ -8,6 +8,7 @@ treated as a broad candidate pool, not an automatic alveolar-macrophage call.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import hashlib
 from pathlib import Path
 import re
 from typing import Any
@@ -8625,6 +8626,23 @@ def _run_spatial_function_one_core(
     return analysis_function(adata=core_adata, **worker_kwargs)
 
 
+def _stable_core_seed(random_state, core_id):
+    """Derive a reproducible seed from the master seed and core identity."""
+    if (
+        not isinstance(random_state, (int, np.integer))
+        or isinstance(random_state, bool)
+        or random_state < 0
+    ):
+        raise ValueError("random_state must be a nonnegative integer.")
+    identity = (
+        f"{int(random_state)}\0"
+        f"{type(core_id).__module__}.{type(core_id).__qualname__}\0"
+        f"{core_id!r}"
+    ).encode("utf-8")
+    digest = hashlib.blake2b(identity, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False)
+
+
 def run_spatial_function_multicore(
     analysis_function,
     adata,
@@ -8691,8 +8709,7 @@ def run_spatial_function_multicore(
     if not core_ids:
         raise ValueError(f"No cores were found in {core_col!r}.")
     worker_count = min(int(n_jobs), len(core_ids))
-    seed_sequences = np.random.SeedSequence(random_state).spawn(len(core_ids))
-    seeds = [sequence.generate_state(1)[0] for sequence in seed_sequences]
+    seeds = [_stable_core_seed(random_state, core_id) for core_id in core_ids]
     tasks = []
     for core_id, seed in zip(core_ids, seeds):
         positions = np.asarray(core_indices[core_id], dtype=int)
@@ -9587,7 +9604,7 @@ def plot_stage1A_niche_dotmap(
     return figures, axes_dictionary, plot_tables
 
 
-def plot_stage1B_primary(
+def _plot_stage1B_primary_impl(
     donor_summary,
     tissue_tests,
     tissue_order=("A", "B", "V"),
@@ -10100,6 +10117,103 @@ def plot_stage1B_primary(
     )
 
     return fig, axes, plot_data
+
+
+def plot_stage1B_primary(
+    donor_summary,
+    tissue_tests,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    method_config=None,
+    donor_col="donor_id",
+    value_col="donor_effect",
+    show_donor_labels=False,
+    random_state=123,
+    save=None,
+    dpi=300,
+):
+    """Plot donor-level Stage 1B effects for the AM–AT2 pair only.
+
+    Parameters
+    ----------
+    donor_summary
+        Donor-level output from `summarize_stage1_by_donor_and_tissue`. Rows
+        must include `focal_type` and `target_type`; non-AM–AT2 rows are removed.
+    tissue_tests
+        Tissue-level output from `summarize_stage1_by_donor_and_tissue`. It is
+        filtered to the same unordered AM–AT2 pair as `donor_summary`.
+    tissue_order
+        Tissue annotations and display order.
+    tissue_colors
+        Optional mapping from tissue annotation to plot color.
+    method_config
+        Optional list of method candidates, selected scale, title, and subtitle.
+    donor_col
+        Column containing biological donor identifiers.
+    value_col
+        Column containing donor-level spatial effects.
+    show_donor_labels
+        Whether to annotate individual plotted points with donor identifiers.
+    random_state
+        Seed controlling visual point jitter only.
+    save
+        Optional output filename passed to Matplotlib.
+    dpi
+        Resolution used when `save` is provided.
+
+    Returns
+    -------
+    fig, axes, plot_data : tuple
+        Matplotlib figure, axes array, and the AM–AT2 donor rows displayed.
+
+    Notes
+    -----
+    The supplied plotting implementation is called unchanged after this input
+    guard. Both `AM → AT2` and `AT2 → AM` directions are retained; unrelated
+    multitype comparisons cannot enter a figure titled as AM–AT2.
+    """
+    pair_columns = {"focal_type", "target_type"}
+    missing_donor = pair_columns.difference(donor_summary.columns)
+    if missing_donor:
+        raise KeyError(
+            f"Missing donor_summary columns: {sorted(missing_donor)}"
+        )
+    missing_tests = pair_columns.difference(tissue_tests.columns)
+    if missing_tests:
+        raise KeyError(
+            f"Missing tissue_tests columns: {sorted(missing_tests)}"
+        )
+
+    am_labels = {"AM", "Alveolar Macrophage"}
+    at2_labels = {"AT2"}
+
+    def pair_mask(table):
+        focal = table["focal_type"].astype(str)
+        target = table["target_type"].astype(str)
+        return (
+            focal.isin(am_labels) & target.isin(at2_labels)
+        ) | (
+            focal.isin(at2_labels) & target.isin(am_labels)
+        )
+
+    filtered_donors = donor_summary.loc[pair_mask(donor_summary)].copy()
+    filtered_tests = tissue_tests.loc[pair_mask(tissue_tests)].copy()
+    if filtered_donors.empty:
+        raise ValueError("No AM–AT2 donor results were found to plot.")
+
+    return _plot_stage1B_primary_impl(
+        donor_summary=filtered_donors,
+        tissue_tests=filtered_tests,
+        tissue_order=tissue_order,
+        tissue_colors=tissue_colors,
+        method_config=method_config,
+        donor_col=donor_col,
+        value_col=value_col,
+        show_donor_labels=show_donor_labels,
+        random_state=random_state,
+        save=save,
+        dpi=dpi,
+    )
 
 
 __all__ = [
