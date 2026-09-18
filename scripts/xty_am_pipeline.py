@@ -10996,6 +10996,519 @@ def _plot_stage2_primary_impl(
     return fig, axes, plot_data
 
 
+def _stage2_resolve_column(data, specified, candidates, required=True):
+    """Resolve one explicitly named or known Stage 2 result column."""
+    if specified is not None:
+        if specified not in data.columns:
+            raise KeyError(f"Column {specified!r} is not present.")
+        return specified
+    for candidate in candidates:
+        if candidate in data.columns:
+            return candidate
+    if required:
+        raise KeyError(f"Could not find any of these columns: {candidates}")
+    return None
+
+
+def _stage2_safe_wilcoxon(values, min_donors=3):
+    """Return a two-sided donor signed-rank P value when estimable."""
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if len(values) < min_donors or not np.any(values != 0):
+        return np.nan
+    try:
+        return float(
+            wilcoxon(values, alternative="two-sided", zero_method="wilcox").pvalue
+        )
+    except ValueError:
+        return np.nan
+
+
+def _aggregate_stage2_donor_effects_equal_core(data, donor_col, effect_col):
+    """Combine core correlations within donor using equal-core Fisher-z means."""
+    rows = []
+    for donor, group in data.groupby(donor_col, observed=True, sort=False):
+        rho = pd.to_numeric(group[effect_col], errors="coerce").to_numpy(dtype=float)
+        valid = np.isfinite(rho)
+        if not valid.any():
+            continue
+        fisher_z = np.arctanh(np.clip(rho[valid], -0.999999, 0.999999))
+        rows.append(
+            {
+                donor_col: donor,
+                "donor_rho": float(np.tanh(np.mean(fisher_z))),
+                "n_cores": int(valid.sum()),
+                "total_weight": float(valid.sum()),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def rank_stage2_core_contributions(
+    core_results,
+    tissue="A",
+    radius=50,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    radius_col=None,
+    effect_col=None,
+    n_col=None,
+    min_donors_for_test=3,
+):
+    """Rank core and donor influence for one prespecified Stage 2 hypothesis.
+
+    Parameters
+    ----------
+    core_results
+        Core-level Stage 2 result table already restricted, or restrictable,
+        to one method, target, and direction.
+    tissue, radius
+        Tissue annotation and spatial radius to evaluate.
+    core_col, donor_col, tissue_col
+        Core, donor, and tissue provenance columns.
+    radius_col, effect_col, n_col
+        Optional explicit result columns. Common names are detected when
+        omitted; ``n_col`` is descriptive and never used as biological weight.
+    min_donors_for_test
+        Minimum donors required for exploratory two-sided Wilcoxon tests.
+
+    Returns
+    -------
+    tuple
+        ``(core_ranking, donor_ranking, summary)``. Core effects are combined
+        within donor using equal-core Fisher-z means. Leave-one-core-out rows
+        state whether removing a core also removes a single-core donor.
+
+    Notes
+    -----
+    This is a sensitivity and figure-selection diagnostic. It must not replace
+    the primary donor-level analysis or be used to select a favorable result.
+    """
+    if not isinstance(core_results, pd.DataFrame):
+        raise TypeError("core_results must be a pandas DataFrame.")
+    _validate_positive_integer(min_donors_for_test, "min_donors_for_test")
+    data = core_results.copy()
+    radius_col = _stage2_resolve_column(
+        data, radius_col, ("radius_um", "radius", "distance_um", "radius_used")
+    )
+    effect_col = _stage2_resolve_column(
+        data, effect_col, ("rho", "spearman_rho", "correlation", "effect")
+    )
+    n_col = _stage2_resolve_column(
+        data, n_col,
+        ("n_am_analyzed", "n_am_tested", "n_query_cells", "n_am", "n_cells", "n_valid"),
+        required=False,
+    )
+    missing = [column for column in (core_col, donor_col, tissue_col) if column not in data]
+    if missing:
+        raise KeyError(f"Required columns are missing: {missing}")
+    if data[[core_col, donor_col, tissue_col]].isna().any().any():
+        raise ValueError("Core, donor, and tissue provenance must be complete.")
+    if not np.isfinite(radius):
+        raise ValueError("radius must be finite.")
+    radius_numeric = pd.to_numeric(data[radius_col], errors="coerce")
+    data = data.loc[
+        data[tissue_col].astype(str).eq(str(tissue))
+        & np.isclose(radius_numeric, float(radius))
+    ].copy()
+    data[effect_col] = pd.to_numeric(data[effect_col], errors="coerce")
+    data = data.loc[data[effect_col].notna()].copy()
+    if data.empty:
+        raise ValueError(f"No valid cores for tissue={tissue!r}, radius={radius}.")
+    if data[core_col].duplicated().any():
+        duplicated = data.loc[
+            data[core_col].duplicated(keep=False), core_col
+        ].astype(str).unique()
+        raise ValueError(
+            "More than one row remains per core after filtering. "
+            f"First duplicated cores: {duplicated[:5].tolist()}. "
+            "Filter to one method, direction, and target first."
+        )
+    if n_col is not None:
+        data[n_col] = pd.to_numeric(data[n_col], errors="coerce")
+    data["_weight"] = 1.0
+    full_donors = _aggregate_stage2_donor_effects_equal_core(data, donor_col, effect_col)
+    full_mean = float(full_donors["donor_rho"].mean())
+    full_median = float(full_donors["donor_rho"].median())
+    full_p = _stage2_safe_wilcoxon(
+        full_donors["donor_rho"], min_donors=min_donors_for_test
+    )
+    donor_core_counts = data.groupby(donor_col, observed=True)[core_col].nunique()
+
+    core_rows = []
+    for _, core in data.iterrows():
+        reduced = data.loc[~data[core_col].eq(core[core_col])]
+        loo_donors = _aggregate_stage2_donor_effects_equal_core(
+            reduced, donor_col, effect_col
+        )
+        loo_mean = float(loo_donors["donor_rho"].mean()) if len(loo_donors) else np.nan
+        loo_median = float(loo_donors["donor_rho"].median()) if len(loo_donors) else np.nan
+        loo_p = _stage2_safe_wilcoxon(
+            loo_donors.get("donor_rho", pd.Series(dtype=float)),
+            min_donors=min_donors_for_test,
+        )
+        core_rho = float(core[effect_col])
+        influence_mean = full_mean - loo_mean
+        influence_median = full_median - loo_median
+        if core_rho > 0 and influence_mean > 0:
+            conclusion = "Supports positive association"
+        elif core_rho < 0 and influence_mean < 0:
+            conclusion = "Opposes positive association"
+        else:
+            conclusion = "Limited or mixed influence"
+        row = {
+            core_col: core[core_col], donor_col: core[donor_col],
+            tissue_col: core[tissue_col], "radius_um": float(radius),
+            "core_rho": core_rho, "core_weight": 1.0,
+            "removes_donor": bool(donor_core_counts.loc[core[donor_col]] == 1),
+            "loo_n_donors": int(len(loo_donors)),
+            "loo_mean_donor_rho": loo_mean,
+            "loo_median_donor_rho": loo_median,
+            "loo_wilcoxon_p": loo_p,
+            "influence_on_mean_donor_rho": influence_mean,
+            "influence_on_median_donor_rho": influence_median,
+            "distance_to_tissue_median": abs(core_rho - full_median),
+            "conclusion": conclusion,
+        }
+        if n_col is not None:
+            row[n_col] = core[n_col]
+        core_rows.append(row)
+    core_ranking = pd.DataFrame(core_rows).sort_values(
+        ["influence_on_mean_donor_rho", "core_rho"], ascending=[False, False]
+    ).reset_index(drop=True)
+    core_ranking.insert(0, "influence_rank", np.arange(1, len(core_ranking) + 1))
+
+    donor_rows = []
+    for _, donor in full_donors.iterrows():
+        reduced = full_donors.loc[~full_donors[donor_col].eq(donor[donor_col])]
+        loo_mean = float(reduced["donor_rho"].mean()) if len(reduced) else np.nan
+        loo_median = float(reduced["donor_rho"].median()) if len(reduced) else np.nan
+        donor_rows.append(
+            {
+                donor_col: donor[donor_col], "donor_rho": donor["donor_rho"],
+                "n_cores": int(donor["n_cores"]),
+                "loo_n_donors": int(len(reduced)),
+                "loo_mean_donor_rho": loo_mean,
+                "loo_median_donor_rho": loo_median,
+                "loo_wilcoxon_p": _stage2_safe_wilcoxon(
+                    reduced["donor_rho"], min_donors=min_donors_for_test
+                ),
+                "influence_on_mean_donor_rho": full_mean - loo_mean,
+                "influence_on_median_donor_rho": full_median - loo_median,
+            }
+        )
+    donor_ranking = pd.DataFrame(donor_rows).sort_values(
+        "influence_on_mean_donor_rho", ascending=False
+    ).reset_index(drop=True)
+    donor_ranking.insert(0, "influence_rank", np.arange(1, len(donor_ranking) + 1))
+    summary = {
+        "tissue_annotation": tissue, "radius_um": float(radius),
+        "n_cores": int(len(data)), "n_donors": int(len(full_donors)),
+        "mean_donor_rho": full_mean, "median_donor_rho": full_median,
+        "wilcoxon_p": full_p, "effect_column": effect_col,
+        "cell_number_column": n_col,
+        "core_aggregation": "equal_core_fisher_z",
+    }
+    return core_ranking, donor_ranking, summary
+
+
+def select_supportive_cores(
+    core_ranking,
+    core_col="core_id",
+    donor_col="donor_id",
+    n_supportive=2,
+    include_typical=True,
+    include_discordant=True,
+):
+    """Select transparent supportive and contextual Stage 2 example cores.
+
+    Parameters
+    ----------
+    core_ranking
+        Output from :func:`rank_stage2_core_contributions`.
+    core_col, donor_col
+        Core and donor identifier columns.
+    n_supportive
+        Maximum supportive cores, selected from distinct donors.
+    include_typical
+        Include one unused positive core nearest the tissue median.
+    include_discordant
+        Include one negative, or otherwise nearest-null, comparison core.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Selected rows with an explicit reason and a false
+        ``selection_is_inferential`` flag.
+
+    Notes
+    -----
+    These cores are illustrative examples for spatial maps. Statistical claims
+    must use all eligible donors and must not depend on the selected examples.
+    """
+    required = {
+        core_col, donor_col, "conclusion", "core_rho",
+        "influence_on_mean_donor_rho", "distance_to_tissue_median",
+    }
+    missing = sorted(required.difference(core_ranking.columns))
+    if missing:
+        raise KeyError(f"Missing core-ranking columns: {missing}")
+    if not isinstance(n_supportive, (int, np.integer)) or n_supportive < 0:
+        raise ValueError("n_supportive must be a nonnegative integer.")
+    selected, used_cores, used_donors = [], set(), set()
+    supportive = core_ranking.loc[
+        core_ranking["conclusion"].eq("Supports positive association")
+    ].sort_values(
+        ["influence_on_mean_donor_rho", "core_rho"], ascending=False
+    )
+    for _, row in supportive.iterrows():
+        if row[donor_col] in used_donors:
+            continue
+        item = row.to_dict()
+        item["selection_reason"] = "Strong supportive core"
+        item["selection_is_inferential"] = False
+        selected.append(item)
+        used_cores.add(row[core_col])
+        used_donors.add(row[donor_col])
+        if len([x for x in selected if x["selection_reason"] == "Strong supportive core"]) >= n_supportive:
+            break
+    if include_typical:
+        candidates = core_ranking.loc[
+            core_ranking["core_rho"].gt(0) & ~core_ranking[core_col].isin(used_cores)
+        ].sort_values("distance_to_tissue_median")
+        if len(candidates):
+            item = candidates.iloc[0].to_dict()
+            item["selection_reason"] = "Typical positive core"
+            item["selection_is_inferential"] = False
+            selected.append(item)
+            used_cores.add(item[core_col])
+    if include_discordant:
+        candidates = core_ranking.loc[~core_ranking[core_col].isin(used_cores)].copy()
+        negative = candidates.loc[candidates["core_rho"].lt(0)].sort_values("core_rho")
+        if len(negative):
+            item = negative.iloc[0].to_dict()
+            reason = "Discordant negative core"
+        elif len(candidates):
+            item = candidates.loc[candidates["core_rho"].abs().idxmin()].to_dict()
+            reason = "Near-null comparison core"
+        else:
+            item = None
+        if item is not None:
+            item["selection_reason"] = reason
+            item["selection_is_inferential"] = False
+            selected.append(item)
+    return pd.DataFrame(selected).reset_index(drop=True)
+
+
+def plot_core_contributions(
+    core_ranking, core_col="core_id", donor_col="donor_id",
+    top_n=None, save=None, dpi=300,
+):
+    """Plot core correlation and leave-one-core-out influence.
+
+    Parameters
+    ----------
+    core_ranking
+        Output from :func:`rank_stage2_core_contributions`.
+    core_col, donor_col
+        Columns used in row labels.
+    top_n
+        Optional number of most influential cores by absolute influence.
+    save
+        Optional output path.
+    dpi
+        Raster resolution used when saving.
+
+    Returns
+    -------
+    tuple
+        Matplotlib figure and the two axes.
+    """
+    required = {
+        core_col, donor_col, "core_rho", "influence_on_mean_donor_rho", "conclusion"
+    }
+    missing = sorted(required.difference(core_ranking.columns))
+    if missing:
+        raise KeyError(f"Missing core-ranking columns: {missing}")
+    data = core_ranking.copy()
+    if top_n is not None:
+        _validate_positive_integer(top_n, "top_n")
+        if len(data) > top_n:
+            indices = data["influence_on_mean_donor_rho"].abs().nlargest(top_n).index
+            data = data.loc[indices].copy()
+    data = data.sort_values("core_rho").reset_index(drop=True)
+    colors = {
+        "Supports positive association": "#E68484",
+        "Opposes positive association": "#6F91C4",
+        "Limited or mixed influence": "#C9C3B8",
+    }
+    point_colors = data["conclusion"].map(colors).fillna("#C9C3B8")
+    y_position = np.arange(len(data))
+    labels = [f"{core} ({donor})" for core, donor in zip(data[core_col], data[donor_col])]
+    fig, axes = plt.subplots(
+        1, 2, figsize=(10.5, max(4, 0.34 * len(data) + 1.4)),
+        sharey=True, gridspec_kw={"wspace": 0.08},
+    )
+    panels = [
+        ("core_rho", "Core Spearman ρ\nMHCII score vs local AT2 fraction"),
+        ("influence_on_mean_donor_rho", "Leave-one-core-out contribution\nPositive = strengthens tissue-A result"),
+    ]
+    for ax, (column, x_label) in zip(axes, panels):
+        values = data[column].to_numpy(dtype=float)
+        ax.axvline(0, color="#9A9A9A", linestyle="--", linewidth=0.8, zorder=0)
+        ax.hlines(y=y_position, xmin=0, xmax=values, color="#D8D8D8", linewidth=1, zorder=1)
+        ax.scatter(values, y_position, s=48, c=point_colors, edgecolor="#303030", linewidth=0.6, zorder=2)
+        ax.set_xlabel(x_label, fontsize=10)
+        ax.grid(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.tick_params(labelsize=8)
+    axes[0].set_yticks(y_position)
+    axes[0].set_yticklabels(labels, fontsize=8)
+    axes[0].set_ylabel("Core ID (donor)", fontsize=10)
+    axes[1].spines["left"].set_visible(False)
+    axes[1].tick_params(axis="y", left=False)
+    fig.suptitle("Core-level contribution to the tissue-A association at 50 µm", fontweight="bold")
+    if save is not None:
+        fig.savefig(save, dpi=dpi, bbox_inches="tight")
+    return fig, axes
+
+
+def plot_mhcii_at2_spatial_core(
+    adata, core_id, output_dir=".", file_prefix="MHCII_AT2_continuous",
+    core_col="core_id", donor_col="donor_id", tissue_col="tissue_annotation",
+    celltype_col="CellType_refined", score_col="MHCIIhi_score", spatial_key="spatial",
+    am_labels=("AM", "Alveolar Macrophage"), at2_labels=("AT2",),
+    low_score_color="#E8899B", midpoint_color="#E6DCE8", high_score_color="#5276B5",
+    at2_color="#8B3F76", background_color="#E7E7E7", point_size=13,
+    at2_point_size=None, background_size=5, score_quantiles=(0.02, 0.98),
+    score_limits=None, invert_y=True, show=False, dpi=300,
+):
+    """Plot one core and export a continuous AM-MHCII/AT2 spatial PDF.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object containing cell metadata and spatial coordinates.
+    core_id, output_dir, file_prefix
+        Core to plot and PDF output location/name prefix.
+    core_col, donor_col, tissue_col, celltype_col, score_col, spatial_key
+        Metadata columns and spatial key.
+    am_labels, at2_labels
+        Values identifying alveolar macrophages and AT2 cells.
+    low_score_color, midpoint_color, high_score_color, at2_color, background_color
+        Supplied macaron plot colors.
+    point_size, at2_point_size, background_size
+        Scatter-point sizes.
+    score_quantiles, score_limits
+        Shared AM color limits from quantiles or explicit ``(vmin, vmax)``.
+    invert_y, show, dpi
+        Coordinate orientation, display behavior, and saved resolution.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the saved PDF.
+    """
+    required = [core_col, celltype_col, score_col]
+    missing = [column for column in required if column not in adata.obs.columns]
+    if missing:
+        raise KeyError(f"Missing adata.obs columns: {missing}")
+    if spatial_key not in adata.obsm:
+        raise KeyError(f"adata.obsm[{spatial_key!r}] is missing.")
+    obs = adata.obs.copy()
+    coordinates = np.asarray(adata.obsm[spatial_key], dtype=float)
+    if coordinates.ndim != 2 or coordinates.shape[0] != len(obs) or coordinates.shape[1] < 2:
+        raise ValueError("Spatial coordinates must match cells and contain x/y columns.")
+    if not np.isfinite(coordinates[:, :2]).all():
+        raise ValueError("Spatial coordinates must be finite.")
+    coordinates = coordinates[:, :2]
+    core_id = str(core_id)
+    core_values = obs[core_col].astype(str)
+    celltypes = obs[celltype_col].astype(str)
+    core_mask = core_values.eq(core_id).to_numpy()
+    if not core_mask.any():
+        preview = core_values.drop_duplicates().tolist()[:10]
+        raise ValueError(f"Core {core_id!r} was not found. First available core IDs: {preview}")
+    if score_limits is None:
+        scale_scores = pd.to_numeric(
+            obs.loc[celltypes.isin(am_labels), score_col], errors="coerce"
+        ).dropna().to_numpy()
+        if scale_scores.size == 0:
+            raise ValueError(f"No finite {score_col!r} values were found among AMs.")
+        if not (0 <= score_quantiles[0] < score_quantiles[1] <= 1):
+            raise ValueError("score_quantiles must satisfy 0 <= low < high <= 1.")
+        score_vmin, score_vmax = np.quantile(scale_scores, score_quantiles)
+    else:
+        if len(score_limits) != 2:
+            raise ValueError("score_limits must contain exactly (vmin, vmax).")
+        score_vmin, score_vmax = map(float, score_limits)
+    if not np.isfinite(score_vmin) or not np.isfinite(score_vmax):
+        raise ValueError("The MHCII score limits must be finite.")
+    if score_vmax <= score_vmin:
+        score_vmax = score_vmin + 1e-9
+    score_cmap = LinearSegmentedColormap.from_list(
+        "mhcii_continuous_pink_blue", [low_score_color, midpoint_color, high_score_color], N=256
+    )
+    score_norm = Normalize(vmin=score_vmin, vmax=score_vmax, clip=True)
+    core_obs, core_xy = obs.loc[core_mask], coordinates[core_mask]
+    core_celltypes = celltypes.loc[core_mask]
+    is_am = core_celltypes.isin(am_labels).to_numpy()
+    is_at2 = core_celltypes.isin(at2_labels).to_numpy()
+    am_xy = core_xy[is_am]
+    am_scores = pd.to_numeric(core_obs.loc[is_am, score_col], errors="coerce").to_numpy()
+    finite_scores = np.isfinite(am_scores)
+    if not finite_scores.any():
+        raise ValueError(f"Core {core_id!r} contains no AMs with finite {score_col!r}.")
+    draw_order = np.argsort(am_scores[finite_scores])
+    at2_point_size = point_size + 2 if at2_point_size is None else at2_point_size
+    fig, ax = plt.subplots(figsize=(5.0, 4.5))
+    ax.scatter(core_xy[:, 0], core_xy[:, 1], s=background_size, c=background_color,
+               linewidths=0, rasterized=True, zorder=0)
+    ax.scatter(core_xy[is_at2, 0], core_xy[is_at2, 1], s=at2_point_size, c=at2_color,
+               linewidths=0, rasterized=True, zorder=2)
+    ax.scatter(am_xy[finite_scores][draw_order, 0], am_xy[finite_scores][draw_order, 1],
+               s=point_size, c=am_scores[finite_scores][draw_order], cmap=score_cmap,
+               norm=score_norm, linewidths=0, rasterized=True, zorder=3)
+    title_parts = [core_id]
+    if donor_col in core_obs:
+        title_parts.append(str(core_obs[donor_col].iloc[0]))
+    if tissue_col in core_obs:
+        title_parts.append(f"tissue {core_obs[tissue_col].iloc[0]}")
+    ax.set_title(" | ".join(title_parts), fontsize=11, fontweight="bold")
+    x_min, x_max = np.nanmin(core_xy[:, 0]), np.nanmax(core_xy[:, 0])
+    y_min, y_max = np.nanmin(core_xy[:, 1]), np.nanmax(core_xy[:, 1])
+    ax.set_xlim(x_min - max((x_max - x_min) * 0.025, 1), x_max + max((x_max - x_min) * 0.025, 1))
+    ax.set_ylim(y_min - max((y_max - y_min) * 0.025, 1), y_max + max((y_max - y_min) * 0.025, 1))
+    if invert_y:
+        ax.invert_yaxis()
+    ax.set_aspect("equal")
+    ax.set_xticks([])
+    ax.set_yticks([])
+    ax.grid(False)
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.legend(handles=[Line2D([0], [0], marker="o", linestyle="none",
+                              markerfacecolor=at2_color, markeredgecolor="none",
+                              markersize=6, label="AT2")],
+              loc="upper right", frameon=False, fontsize=8)
+    colorbar = fig.colorbar(mpl.cm.ScalarMappable(norm=score_norm, cmap=score_cmap),
+                            ax=ax, fraction=0.045, pad=0.025)
+    colorbar.set_label("AM MHCIIhi score", fontsize=9)
+    colorbar.ax.tick_params(labelsize=8)
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    safe_core_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", core_id)
+    output_file = output_dir / f"{file_prefix}_{safe_core_id}.pdf"
+    fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+    return output_file
+
+
 def assign_balanced_mhcii_extremes(
     obs, score_col="MHCIIhi_score", celltype_col="CellType_refined",
     core_col="core_id", am_labels=("AM", "Alveolar Macrophage"),
@@ -11741,13 +12254,15 @@ __all__ = [
     "plot_knn_niche_continuum",
     "plot_stage1A_niche_dotmap", "plot_stage1B_primary",
     "plot_stage2_primary", "plot_stage2_scale_sensitivity",
+    "plot_core_contributions", "plot_mhcii_at2_spatial_core",
     "plot_macrophage_pct_by_tissue", "plot_metadata_summary",
     "plot_marker_dotplot", "plot_nhood_enrichment_donor_tissue",
     "plot_program_umap", "plot_radius_core_correlations",
     "plot_spatial_celltypes",
     "plot_spatial_focus", "plot_spatial_programs", "radius_weighted_mean",
     "save_figure", "export_spatial_cellchat_inputs",
-    "select_representative_cores", "summarize_markers",
+    "select_representative_cores", "select_supportive_cores",
+    "summarize_markers", "rank_stage2_core_contributions",
     "summarize_lr_by_donor", "summarise_lr_by_donor",
     "summarize_nhood_by_donor", "summarize_stage1_by_donor_and_tissue",
     "summarize_stage2_by_donor_and_tissue",

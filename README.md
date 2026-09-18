@@ -112,6 +112,8 @@ returns, errors, and relevant scientific interpretation.
 | `calculate_stage2_nearest_at2_by_core` | Correlates the continuous AM MHCII score with nearest-AT2 distance and reverses the sign so positive effects consistently mean that higher-score AMs are closer to AT2. |
 | `run_stage2_multicore` | Compatibility wrapper around `run_spatial_function_multicore` for the Stage 2 functions. Core-level permutation P values and `FDR_core` are diagnostic rather than final biological-replicate inference. |
 | `summarize_stage2_by_donor_and_tissue` | Averages Stage 2 effects across cores within donor/tissue, then performs one-sided donor-level Wilcoxon tests and Benjamini–Hochberg correction within declared method/scale/tissue families. |
+| `rank_stage2_core_contributions` | Performs leave-one-core-out and leave-one-donor-out sensitivity analysis for one prespecified tissue/radius/hypothesis. Core correlations are combined equally on the Fisher-z scale within donor; AM cell counts are descriptive, and rows explicitly flag when omitting a core also removes a single-core donor. |
+| `select_supportive_cores` | Selects supportive cores from distinct donors plus optional typical and discordant/near-null examples for transparent spatial illustration. The returned `selection_is_inferential=False` flag records that these examples cannot replace all-donor inference. |
 | `summarize_nhood_by_donor` | Summarizes core-level neighborhood enrichment within donor, tissue, radius, and neighbor type. Mean/median z-scores are descriptive rather than a formal meta-analysis. |
 | `calculate_knn_niche_continuum` | Quantifies each AM's k-nearest-neighbor composition within core, calculates within-core score correlations, combines core correlations within donor using Fisher z, and tests donor correlations by tissue. |
 | `calculate_radius_niche_continuum` | Quantifies fixed-radius neighbor count, fraction, density, or presence around each AM within core and performs core-, donor-, and tissue-level correlation summaries. |
@@ -162,6 +164,8 @@ partly circular and require sensitivity analysis excluding overlapping genes.
 | `plot_stage1B_primary` | Filters full multitype summaries to the unordered AM–AT2 pair, then shows individual donor effects, medians, interquartile ranges, and donor-level tissue-test annotations for selected Stage 1 methods and scales. Both directional orientations are retained. |
 | `plot_stage2_primary` | Shows donor-level effects, median diamonds, donor IQRs, and donor-level tissue-test annotations for prespecified continuous kNN, radius, and nearest-AT2 analyses plus a clearly marked secondary balanced-tail panel. Duplicate donor or tissue-test rows are rejected before plotting. |
 | `plot_stage2_scale_sensitivity` | Displays the median and IQR of donor effects across k or radius values by tissue. This is a descriptive sensitivity plot based on unique donor rows, not a cell- or core-level inferential analysis. |
+| `plot_core_contributions` | Preserves the supplied two-panel macaron plot of core Spearman correlations and leave-one-core-out influence, with optional top-influence filtering and file export. |
+| `plot_mhcii_at2_spatial_core` | Exports a single-core PDF showing continuous AM MHCII score, AT2 cells, and background cells using a shared cross-core AM score scale. |
 | `save_figure` | Saves a figure as matching PNG and PDF files. |
 
 Stage 2 uses the continuous MHCII score as the primary exposure. Balanced
