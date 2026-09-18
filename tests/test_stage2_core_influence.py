@@ -26,11 +26,23 @@ def _core_results():
     )
 
 
-def test_rank_stage2_core_contributions_equal_weights_cores_within_donor():
+def _native_stage2_results():
+    """Return the schema emitted by native Stage 2 radius functions."""
+    data = _core_results().rename(
+        columns={"radius_um": "scale", "rho": "effect", "n_am_tested": "n_am_analyzed"}
+    )
+    data["method"] = "Continuous MHCII radius"
+    data["direction"] = "MHCII score → AT2 exposure"
+    data["scale_type"] = "radius_um"
+    data["effect_type"] = "correlation"
+    return data
+
+
+def test_rank_stage2_core_contributions_matches_primary_equal_core_estimator():
     core_ranking, donor_ranking, summary = pipeline.rank_stage2_core_contributions(
         _core_results(), tissue="A", radius=50, min_donors_for_test=3
     )
-    expected_d1 = np.tanh(np.mean(np.arctanh([0.2, 0.8])))
+    expected_d1 = np.mean([0.2, 0.8])
     d1 = donor_ranking.loc[donor_ranking["donor_id"].eq("D1")].iloc[0]
     assert d1["donor_rho"] == pytest.approx(expected_d1)
     assert summary["mean_donor_rho"] == pytest.approx(
@@ -40,13 +52,38 @@ def test_rank_stage2_core_contributions_equal_weights_cores_within_donor():
     removes_donor = core_ranking.set_index("core_id")["removes_donor"]
     assert not bool(removes_donor["D1.C1"])
     assert bool(removes_donor["D2.C1"])
-    assert summary["core_aggregation"] == "equal_core_fisher_z"
+    assert summary["core_aggregation"] == "equal_core_arithmetic"
+    assert summary["test_alternative"] == "greater"
+
+    _, fisher_donors, fisher_summary = pipeline.rank_stage2_core_contributions(
+        _core_results(), donor_aggregation="fisher_z", test_alternative="two-sided"
+    )
+    fisher_d1 = fisher_donors.loc[fisher_donors["donor_id"].eq("D1")].iloc[0]
+    assert fisher_d1["donor_rho"] == pytest.approx(
+        np.tanh(np.mean(np.arctanh([0.2, 0.8])))
+    )
+    assert fisher_summary["core_aggregation"] == "equal_core_fisher_z"
+    assert fisher_summary["test_alternative"] == "two-sided"
 
 
 def test_rank_stage2_core_contributions_requires_one_hypothesis_row_per_core():
     duplicated = pd.concat([_core_results(), _core_results().iloc[[0]]], ignore_index=True)
     with pytest.raises(ValueError, match="one row remains per core"):
         pipeline.rank_stage2_core_contributions(duplicated)
+
+
+def test_rank_stage2_core_contributions_accepts_native_correlation_schema_only():
+    core_ranking, donor_ranking, summary = pipeline.rank_stage2_core_contributions(
+        _native_stage2_results()
+    )
+    assert len(core_ranking) == 4
+    assert len(donor_ranking) == 3
+    assert summary["method"] == "Continuous MHCII radius"
+    assert summary["scale_type"] == "radius_um"
+    noncorrelation = _native_stage2_results()
+    noncorrelation["effect_type"] = "difference"
+    with pytest.raises(ValueError, match="correlation"):
+        pipeline.rank_stage2_core_contributions(noncorrelation)
 
 
 def test_select_supportive_cores_uses_distinct_donors_and_context_examples():
@@ -59,6 +96,13 @@ def test_select_supportive_cores_uses_distinct_donors_and_context_examples():
     assert len(supportive) <= 2
     assert "Discordant negative core" in set(selected["selection_reason"])
     assert selected["selection_is_inferential"].eq(False).all()
+    none_supportive = pipeline.select_supportive_cores(
+        core_ranking,
+        n_supportive=0,
+        include_typical=False,
+        include_discordant=False,
+    )
+    assert none_supportive.empty
 
 
 def test_core_contribution_and_spatial_plots_write_files(tmp_path):
@@ -68,6 +112,19 @@ def test_core_contribution_and_spatial_plots_write_files(tmp_path):
     assert figure_path.exists()
     assert len(axes) == 2
     fig.clf()
+
+    native = _native_stage2_results()
+    native["tissue_annotation"] = "B"
+    native["scale"] = 100.0
+    native_ranking, _, _ = pipeline.rank_stage2_core_contributions(
+        native, tissue="B", radius=100
+    )
+    dynamic_fig, dynamic_axes = pipeline.plot_core_contributions(native_ranking)
+    assert "tissue B" in dynamic_fig._suptitle.get_text()
+    assert "100" in dynamic_fig._suptitle.get_text()
+    assert "local AT2 fraction" not in dynamic_axes[0].get_xlabel()
+    assert "tissue-A" not in dynamic_axes[1].get_xlabel()
+    dynamic_fig.clf()
 
     obs = pd.DataFrame(
         {

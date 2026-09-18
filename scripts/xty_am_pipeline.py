@@ -11010,33 +11010,49 @@ def _stage2_resolve_column(data, specified, candidates, required=True):
     return None
 
 
-def _stage2_safe_wilcoxon(values, min_donors=3):
-    """Return a two-sided donor signed-rank P value when estimable."""
+def _stage2_safe_wilcoxon(values, min_donors=3, alternative="greater"):
+    """Return a donor signed-rank P value when estimable."""
+    if alternative not in {"greater", "less", "two-sided"}:
+        raise ValueError(
+            "alternative must be 'greater', 'less', or 'two-sided'."
+        )
     values = np.asarray(values, dtype=float)
     values = values[np.isfinite(values)]
     if len(values) < min_donors or not np.any(values != 0):
         return np.nan
     try:
         return float(
-            wilcoxon(values, alternative="two-sided", zero_method="wilcox").pvalue
+            wilcoxon(values, alternative=alternative, zero_method="wilcox").pvalue
         )
     except ValueError:
         return np.nan
 
 
-def _aggregate_stage2_donor_effects_equal_core(data, donor_col, effect_col):
-    """Combine core correlations within donor using equal-core Fisher-z means."""
+def _aggregate_stage2_donor_effects_equal_core(
+    data,
+    donor_col,
+    effect_col,
+    aggregation="arithmetic",
+):
+    """Combine core correlations within donor with equal core weights."""
+    if aggregation not in {"arithmetic", "fisher_z"}:
+        raise ValueError("aggregation must be 'arithmetic' or 'fisher_z'.")
     rows = []
     for donor, group in data.groupby(donor_col, observed=True, sort=False):
         rho = pd.to_numeric(group[effect_col], errors="coerce").to_numpy(dtype=float)
         valid = np.isfinite(rho)
         if not valid.any():
             continue
-        fisher_z = np.arctanh(np.clip(rho[valid], -0.999999, 0.999999))
+        valid_rho = rho[valid]
+        if aggregation == "fisher_z":
+            fisher_z = np.arctanh(np.clip(valid_rho, -0.999999, 0.999999))
+            donor_rho = float(np.tanh(np.mean(fisher_z)))
+        else:
+            donor_rho = float(np.mean(valid_rho))
         rows.append(
             {
                 donor_col: donor,
-                "donor_rho": float(np.tanh(np.mean(fisher_z))),
+                "donor_rho": donor_rho,
                 "n_cores": int(valid.sum()),
                 "total_weight": float(valid.sum()),
             }
@@ -11055,6 +11071,8 @@ def rank_stage2_core_contributions(
     effect_col=None,
     n_col=None,
     min_donors_for_test=3,
+    donor_aggregation="arithmetic",
+    test_alternative="greater",
 ):
     """Rank core and donor influence for one prespecified Stage 2 hypothesis.
 
@@ -11071,14 +11089,20 @@ def rank_stage2_core_contributions(
         Optional explicit result columns. Common names are detected when
         omitted; ``n_col`` is descriptive and never used as biological weight.
     min_donors_for_test
-        Minimum donors required for exploratory two-sided Wilcoxon tests.
+        Minimum donors required for exploratory Wilcoxon tests.
+    donor_aggregation
+        Equal-core aggregation within donor: ``"arithmetic"`` matches the
+        primary Stage 2 summary; ``"fisher_z"`` is an optional sensitivity.
+    test_alternative
+        Wilcoxon alternative. ``"greater"`` matches the prespecified primary
+        hypothesis that higher MHCII score indicates greater AT2 association.
 
     Returns
     -------
     tuple
-        ``(core_ranking, donor_ranking, summary)``. Core effects are combined
-        within donor using equal-core Fisher-z means. Leave-one-core-out rows
-        state whether removing a core also removes a single-core donor.
+        ``(core_ranking, donor_ranking, summary)``. Core effects receive equal
+        weight within donor. Leave-one-core-out rows state whether removing a
+        core also removes a single-core donor.
 
     Notes
     -----
@@ -11088,9 +11112,18 @@ def rank_stage2_core_contributions(
     if not isinstance(core_results, pd.DataFrame):
         raise TypeError("core_results must be a pandas DataFrame.")
     _validate_positive_integer(min_donors_for_test, "min_donors_for_test")
+    if donor_aggregation not in {"arithmetic", "fisher_z"}:
+        raise ValueError(
+            "donor_aggregation must be 'arithmetic' or 'fisher_z'."
+        )
+    if test_alternative not in {"greater", "less", "two-sided"}:
+        raise ValueError(
+            "test_alternative must be 'greater', 'less', or 'two-sided'."
+        )
     data = core_results.copy()
     radius_col = _stage2_resolve_column(
-        data, radius_col, ("radius_um", "radius", "distance_um", "radius_used")
+        data, radius_col,
+        ("radius_um", "radius", "distance_um", "radius_used", "scale")
     )
     effect_col = _stage2_resolve_column(
         data, effect_col, ("rho", "spearman_rho", "correlation", "effect")
@@ -11116,6 +11149,33 @@ def rank_stage2_core_contributions(
     data = data.loc[data[effect_col].notna()].copy()
     if data.empty:
         raise ValueError(f"No valid cores for tissue={tissue!r}, radius={radius}.")
+    if effect_col == "effect":
+        if "effect_type" not in data.columns:
+            raise ValueError(
+                "The generic 'effect' column requires effect_type='correlation' "
+                "before correlation aggregation."
+            )
+        effect_types = data["effect_type"].dropna().astype(str).unique()
+        if len(effect_types) != 1 or effect_types[0] != "correlation":
+            raise ValueError(
+                "rank_stage2_core_contributions supports correlation effects "
+                "only; balanced-tail differences require native-scale aggregation."
+            )
+    hypothesis_values = {}
+    for column, fallback in (
+        ("method", "Stage 2 correlation"),
+        ("direction", "Unspecified direction"),
+        ("scale_type", "radius_um"),
+    ):
+        if column in data.columns:
+            values = data[column].dropna().astype(str).unique()
+            if len(values) != 1:
+                raise ValueError(
+                    f"More than one {column} remains; filter to one hypothesis first."
+                )
+            hypothesis_values[column] = values[0]
+        else:
+            hypothesis_values[column] = fallback
     if data[core_col].duplicated().any():
         duplicated = data.loc[
             data[core_col].duplicated(keep=False), core_col
@@ -11128,11 +11188,18 @@ def rank_stage2_core_contributions(
     if n_col is not None:
         data[n_col] = pd.to_numeric(data[n_col], errors="coerce")
     data["_weight"] = 1.0
-    full_donors = _aggregate_stage2_donor_effects_equal_core(data, donor_col, effect_col)
+    full_donors = _aggregate_stage2_donor_effects_equal_core(
+        data,
+        donor_col,
+        effect_col,
+        aggregation=donor_aggregation,
+    )
     full_mean = float(full_donors["donor_rho"].mean())
     full_median = float(full_donors["donor_rho"].median())
     full_p = _stage2_safe_wilcoxon(
-        full_donors["donor_rho"], min_donors=min_donors_for_test
+        full_donors["donor_rho"],
+        min_donors=min_donors_for_test,
+        alternative=test_alternative,
     )
     donor_core_counts = data.groupby(donor_col, observed=True)[core_col].nunique()
 
@@ -11140,13 +11207,17 @@ def rank_stage2_core_contributions(
     for _, core in data.iterrows():
         reduced = data.loc[~data[core_col].eq(core[core_col])]
         loo_donors = _aggregate_stage2_donor_effects_equal_core(
-            reduced, donor_col, effect_col
+            reduced,
+            donor_col,
+            effect_col,
+            aggregation=donor_aggregation,
         )
         loo_mean = float(loo_donors["donor_rho"].mean()) if len(loo_donors) else np.nan
         loo_median = float(loo_donors["donor_rho"].median()) if len(loo_donors) else np.nan
         loo_p = _stage2_safe_wilcoxon(
             loo_donors.get("donor_rho", pd.Series(dtype=float)),
             min_donors=min_donors_for_test,
+            alternative=test_alternative,
         )
         core_rho = float(core[effect_col])
         influence_mean = full_mean - loo_mean
@@ -11160,6 +11231,9 @@ def rank_stage2_core_contributions(
         row = {
             core_col: core[core_col], donor_col: core[donor_col],
             tissue_col: core[tissue_col], "radius_um": float(radius),
+            "method": hypothesis_values["method"],
+            "direction": hypothesis_values["direction"],
+            "scale_type": hypothesis_values["scale_type"],
             "core_rho": core_rho, "core_weight": 1.0,
             "removes_donor": bool(donor_core_counts.loc[core[donor_col]] == 1),
             "loo_n_donors": int(len(loo_donors)),
@@ -11192,7 +11266,9 @@ def rank_stage2_core_contributions(
                 "loo_mean_donor_rho": loo_mean,
                 "loo_median_donor_rho": loo_median,
                 "loo_wilcoxon_p": _stage2_safe_wilcoxon(
-                    reduced["donor_rho"], min_donors=min_donors_for_test
+                    reduced["donor_rho"],
+                    min_donors=min_donors_for_test,
+                    alternative=test_alternative,
                 ),
                 "influence_on_mean_donor_rho": full_mean - loo_mean,
                 "influence_on_median_donor_rho": full_median - loo_median,
@@ -11208,7 +11284,11 @@ def rank_stage2_core_contributions(
         "mean_donor_rho": full_mean, "median_donor_rho": full_median,
         "wilcoxon_p": full_p, "effect_column": effect_col,
         "cell_number_column": n_col,
-        "core_aggregation": "equal_core_fisher_z",
+        "core_aggregation": f"equal_core_{donor_aggregation}",
+        "test_alternative": test_alternative,
+        "method": hypothesis_values["method"],
+        "direction": hypothesis_values["direction"],
+        "scale_type": hypothesis_values["scale_type"],
     }
     return core_ranking, donor_ranking, summary
 
@@ -11262,17 +11342,18 @@ def select_supportive_cores(
     ].sort_values(
         ["influence_on_mean_donor_rho", "core_rho"], ascending=False
     )
-    for _, row in supportive.iterrows():
-        if row[donor_col] in used_donors:
-            continue
-        item = row.to_dict()
-        item["selection_reason"] = "Strong supportive core"
-        item["selection_is_inferential"] = False
-        selected.append(item)
-        used_cores.add(row[core_col])
-        used_donors.add(row[donor_col])
-        if len([x for x in selected if x["selection_reason"] == "Strong supportive core"]) >= n_supportive:
-            break
+    if n_supportive > 0:
+        for _, row in supportive.iterrows():
+            if row[donor_col] in used_donors:
+                continue
+            item = row.to_dict()
+            item["selection_reason"] = "Strong supportive core"
+            item["selection_is_inferential"] = False
+            selected.append(item)
+            used_cores.add(row[core_col])
+            used_donors.add(row[donor_col])
+            if len(selected) >= n_supportive:
+                break
     if include_typical:
         candidates = core_ranking.loc[
             core_ranking["core_rho"].gt(0) & ~core_ranking[core_col].isin(used_cores)
@@ -11351,8 +11432,11 @@ def plot_core_contributions(
         sharey=True, gridspec_kw={"wspace": 0.08},
     )
     panels = [
-        ("core_rho", "Core Spearman ρ\nMHCII score vs local AT2 fraction"),
-        ("influence_on_mean_donor_rho", "Leave-one-core-out contribution\nPositive = strengthens tissue-A result"),
+        ("core_rho", "Core correlation (Spearman ρ)\nPrespecified Stage 2 endpoint"),
+        (
+            "influence_on_mean_donor_rho",
+            "Leave-one-core-out contribution\nPositive = strengthens prespecified association",
+        ),
     ]
     for ax, (column, x_label) in zip(axes, panels):
         values = data[column].to_numpy(dtype=float)
@@ -11369,7 +11453,36 @@ def plot_core_contributions(
     axes[0].set_ylabel("Core ID (donor)", fontsize=10)
     axes[1].spines["left"].set_visible(False)
     axes[1].tick_params(axis="y", left=False)
-    fig.suptitle("Core-level contribution to the tissue-A association at 50 µm", fontweight="bold")
+    tissue_values = (
+        data["tissue_annotation"].dropna().astype(str).unique()
+        if "tissue_annotation" in data else np.asarray([])
+    )
+    scale_values = (
+        pd.to_numeric(data["radius_um"], errors="coerce").dropna().unique()
+        if "radius_um" in data else np.asarray([])
+    )
+    method_values = (
+        data["method"].dropna().astype(str).unique()
+        if "method" in data else np.asarray([])
+    )
+    scale_type_values = (
+        data["scale_type"].dropna().astype(str).unique()
+        if "scale_type" in data else np.asarray([])
+    )
+    title_parts = ["Core-level contribution"]
+    if len(method_values) == 1:
+        title_parts.append(method_values[0])
+    if len(tissue_values) == 1:
+        title_parts.append(f"tissue {tissue_values[0]}")
+    if len(scale_values) == 1:
+        scale_type = scale_type_values[0] if len(scale_type_values) == 1 else "radius_um"
+        if scale_type == "radius_um":
+            title_parts.append(f"{scale_values[0]:g} µm")
+        elif scale_type == "k_neighbors":
+            title_parts.append(f"k={scale_values[0]:g}")
+        else:
+            title_parts.append(f"scale={scale_values[0]:g} ({scale_type})")
+    fig.suptitle(" | ".join(title_parts), fontweight="bold")
     if save is not None:
         fig.savefig(save, dpi=dpi, bbox_inches="tight")
     return fig, axes
