@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from scripts import xty_am_pipeline as pipeline
 
@@ -136,6 +137,47 @@ def make_categorical_stage3_adata(
     return SimpleNamespace(obs=obs, n_obs=len(obs))
 
 
+def make_stage3_core_results() -> pd.DataFrame:
+    """Return correlation effects with unequal core counts per donor."""
+    return pd.DataFrame(
+        [
+            {"method": "radius_continuum", "scale_type": "radius_um", "scale": 50.0,
+             "effect_name": "spearman_rho", "effect": 0.2, "donor_id": "D1",
+             "tissue_annotation": "A", "core_id": "C1", "n_am_analyzed": 20},
+            {"method": "radius_continuum", "scale_type": "radius_um", "scale": 50.0,
+             "effect_name": "spearman_rho", "effect": 0.8, "donor_id": "D1",
+             "tissue_annotation": "A", "core_id": "C2", "n_am_analyzed": 20},
+            {"method": "radius_continuum", "scale_type": "radius_um", "scale": 50.0,
+             "effect_name": "spearman_rho", "effect": 0.3, "donor_id": "D2",
+             "tissue_annotation": "A", "core_id": "C3", "n_am_analyzed": 20},
+            {"method": "radius_continuum", "scale_type": "radius_um", "scale": 50.0,
+             "effect_name": "spearman_rho", "effect": 0.4, "donor_id": "D3",
+             "tissue_annotation": "A", "core_id": "C4", "n_am_analyzed": 20},
+        ]
+    )
+
+
+def make_multifamily_stage3_results() -> pd.DataFrame:
+    """Return one test family spanning three tissues and three donors each."""
+    rows = []
+    for tissue_index, tissue in enumerate(("A", "B", "V")):
+        for donor_index in range(3):
+            rows.append(
+                {
+                    "method": "radius_continuum",
+                    "scale_type": "radius_um",
+                    "scale": 50.0,
+                    "effect_name": "spearman_rho",
+                    "effect": -0.2 - 0.05 * tissue_index - 0.01 * donor_index,
+                    "donor_id": f"D{donor_index + 1}",
+                    "tissue_annotation": tissue,
+                    "core_id": f"{tissue}_C{donor_index + 1}",
+                    "n_am_analyzed": 20,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
 def test_stage3_reused_core_ids_remain_separate_by_donor():
     """Identical core labels in different donors must never be pooled."""
     result = pipeline.calculate_stage3_radius_continuum_by_core(
@@ -250,3 +292,50 @@ def test_stage3_categorical_nearest_requires_both_am_groups():
         n_permutations=19,
     )
     assert result.empty
+
+
+def test_stage3_summary_equal_weights_cores_and_supports_less_alternative():
+    """Donors, not cells or cores, must be the tissue-level replicates."""
+    donor, tissue = pipeline.summarize_stage3_by_donor_and_tissue(
+        make_stage3_core_results(), alternative="less", min_donors=3
+    )
+    d1 = donor.loc[donor["donor_id"].eq("D1")].iloc[0]
+    expected = np.tanh(np.mean(np.arctanh([0.2, 0.8])))
+    assert d1["donor_effect"] == pytest.approx(expected)
+    assert d1["n_cores"] == 2
+    assert tissue.iloc[0]["alternative"] == "less"
+
+
+def test_stage3_summary_fdr_is_scoped_by_method_effect_and_scale():
+    """BH correction must operate across tissues only within one method family."""
+    _, tissue = pipeline.summarize_stage3_by_donor_and_tissue(
+        make_multifamily_stage3_results(), min_donors=3
+    )
+    assert "fdr_bh" in tissue
+    assert set(tissue["fdr_family_size"]) == {3}
+
+
+def test_stage3_plots_save_outputs(tmp_path):
+    """Primary, sensitivity, and pair heatmap functions must write figures."""
+    donor, tissue = pipeline.summarize_stage3_by_donor_and_tissue(
+        make_multifamily_stage3_results(), min_donors=3
+    )
+    primary = tmp_path / "primary.pdf"
+    sensitivity = tmp_path / "sensitivity.pdf"
+    heatmap = tmp_path / "pairs.pdf"
+    pipeline.plot_stage3_primary(donor, tissue, save=primary)
+    pipeline.plot_stage3_scale_sensitivity(donor, save=sensitivity)
+    pair_results = pd.DataFrame(
+        {
+            "method": ["categorical_pair_enrichment"] * 3,
+            "donor_id": ["D1", "D2", "D3"],
+            "tissue_annotation": ["A", "B", "V"],
+            "scale": [50.0, 50.0, 50.0],
+            "log2_oe_lo_lo": [0.2, 0.1, -0.1],
+            "log2_oe_lo_hi": [-0.2, -0.1, 0.1],
+            "log2_oe_hi_lo": [0.3, 0.2, -0.2],
+            "log2_oe_hi_hi": [-0.3, -0.2, 0.2],
+        }
+    )
+    pipeline.plot_stage3_categorical_pair_heatmap(pair_results, save=heatmap)
+    assert primary.exists() and sensitivity.exists() and heatmap.exists()

@@ -14574,6 +14574,799 @@ def calculate_stage3_categorical_nearest_at2_by_core(
     return _stage3_finish(rows)
 
 
+def summarize_stage3_by_donor_and_tissue(
+    stage3_results,
+    *,
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    core_col="core_id",
+    min_donors=3,
+    alternative="two-sided",
+):
+    """Aggregate cores within donors and test donor effects within tissues.
+
+    Spearman correlations are Fisher-z transformed before averaging or
+    testing. Balanced-extreme mean differences remain on their original AT2
+    VIM-score scale. Every donor receives equal weight in tissue-level tests.
+    The default two-sided test is appropriate because the VIM-specific spatial
+    direction was not tested in the source paper; use alternative="less" only
+    for a prospectively specified negative-coupling hypothesis.
+    """
+    from scipy.stats import t as student_t
+    from scipy.stats import wilcoxon
+
+    if alternative not in {"two-sided", "greater", "less"}:
+        raise ValueError(
+            "alternative must be 'two-sided', 'greater', or 'less'."
+        )
+    if isinstance(min_donors, bool) or int(min_donors) != min_donors or min_donors < 2:
+        raise ValueError("min_donors must be an integer of at least two.")
+
+    required = {
+        "method", "scale", "effect", "effect_name",
+        donor_col, tissue_col, core_col,
+    }
+    missing = sorted(required.difference(stage3_results.columns))
+    if missing:
+        raise KeyError(f"Missing Stage 3 result columns: {missing}")
+
+    data = stage3_results.loc[np.isfinite(stage3_results["effect"])].copy()
+    data["effect_transformed"] = data["effect"].astype(float)
+    correlation = data["effect_name"].eq("spearman_rho")
+    data.loc[correlation, "effect_transformed"] = np.arctanh(
+        np.clip(data.loc[correlation, "effect"].astype(float), -0.999999, 0.999999)
+    )
+
+    donor_rows = []
+    donor_group_cols = ["method", "scale", "scale_type", "effect_name", tissue_col, donor_col]
+    donor_group_cols = [c for c in donor_group_cols if c in data.columns]
+    for keys, group in data.groupby(donor_group_cols, observed=True, dropna=False):
+        key_dict = dict(zip(donor_group_cols, keys if isinstance(keys, tuple) else (keys,)))
+        transformed = float(group["effect_transformed"].mean())
+        is_correlation = key_dict["effect_name"] == "spearman_rho"
+        donor_effect = float(np.tanh(transformed)) if is_correlation else transformed
+        donor_rows.append({
+            **key_dict,
+            "donor_effect": donor_effect,
+            "donor_effect_transformed": transformed,
+            "n_cores": int(group[core_col].nunique()),
+            "mean_core_effect": float(group["effect"].mean()),
+            "median_core_effect": float(group["effect"].median()),
+            "n_am_analyzed": float(group.get("n_am_analyzed", pd.Series(dtype=float)).sum()),
+        })
+    donor_summary = pd.DataFrame(donor_rows)
+
+    tissue_rows = []
+    tissue_group_cols = ["method", "scale", "scale_type", "effect_name", tissue_col]
+    tissue_group_cols = [c for c in tissue_group_cols if c in donor_summary.columns]
+    for keys, group in donor_summary.groupby(
+        tissue_group_cols, observed=True, dropna=False
+    ):
+        key_dict = dict(zip(tissue_group_cols, keys if isinstance(keys, tuple) else (keys,)))
+        values = group["donor_effect_transformed"].to_numpy(float)
+        values = values[np.isfinite(values)]
+        n = len(values)
+        if n < min_donors:
+            continue
+        if np.allclose(values, 0):
+            p_value = 1.0
+        else:
+            p_value = float(
+                wilcoxon(values, zero_method="wilcox", alternative=alternative).pvalue
+            )
+        mean_t = float(np.mean(values))
+        median_t = float(np.median(values))
+        if n > 1:
+            se = float(np.std(values, ddof=1) / np.sqrt(n))
+            critical = float(student_t.ppf(0.975, n - 1))
+            low_t, high_t = mean_t - critical * se, mean_t + critical * se
+        else:
+            low_t = high_t = np.nan
+        is_correlation = key_dict["effect_name"] == "spearman_rho"
+        back = np.tanh if is_correlation else lambda value: value
+        tissue_rows.append({
+            **key_dict,
+            "n_donors": n,
+            "mean_effect": float(back(mean_t)),
+            "median_effect": float(back(median_t)),
+            "ci_low": float(back(low_t)) if np.isfinite(low_t) else np.nan,
+            "ci_high": float(back(high_t)) if np.isfinite(high_t) else np.nan,
+            "p_value": p_value,
+            "alternative": alternative,
+            "direction": "positive" if mean_t > 0 else "negative" if mean_t < 0 else "null",
+        })
+    tissue_tests = pd.DataFrame(tissue_rows)
+    if not tissue_tests.empty:
+        tissue_tests["fdr_bh"] = np.nan
+        tissue_tests["fdr_family_size"] = 0
+        family_columns = [
+            column
+            for column in ("method", "effect_name", "scale_type", "scale")
+            if column in tissue_tests.columns
+        ]
+        for indices in tissue_tests.groupby(
+            family_columns, observed=True, dropna=False
+        ).groups.values():
+            indices = list(indices)
+            tissue_tests.loc[indices, "fdr_bh"] = _stage3_bh_fdr(
+                tissue_tests.loc[indices, "p_value"]
+            )
+            tissue_tests.loc[indices, "fdr_family_size"] = len(indices)
+        tissue_tests["fdr_family_size"] = tissue_tests[
+            "fdr_family_size"
+        ].astype(int)
+        tissue_tests = tissue_tests.sort_values(
+            ["method", "scale", tissue_col]
+        ).reset_index(drop=True)
+    return donor_summary, tissue_tests
+
+
+def _stage3_significance_label(value):
+    if not np.isfinite(value):
+        return ""
+    if value < 0.001:
+        return "***"
+    if value < 0.01:
+        return "**"
+    if value < 0.05:
+        return "*"
+    return "ns"
+
+
+def plot_stage3_primary(
+    donor_summary,
+    tissue_tests,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    method_config=None,
+    primary_scales=None,
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    value_col="donor_effect",
+    show_donor_labels=False,
+    annotate_fdr=True,
+    random_state=123,
+    suptitle="Spatial coupling between AM MHCII and AT2 VIM states",
+    width_cm=None,
+    height_cm=None,
+    save=None,
+    dpi=300,
+):
+    """Stage 2-style donor forest plot for primary Stage 3 analyses.
+
+    Points are biological donors, diamonds are donor medians, and horizontal
+    intervals are donor IQRs. Tissue-level q/p values are displayed on the
+    right of each row. The balanced-extremes panel is marked as secondary.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    required_donor = {"method", "scale", tissue_col, donor_col, value_col}
+    missing = sorted(required_donor.difference(donor_summary.columns))
+    if missing:
+        raise KeyError(f"Missing donor_summary columns: {missing}")
+    required_tests = {"method", "scale", tissue_col}
+    missing = sorted(required_tests.difference(tissue_tests.columns))
+    if missing:
+        raise KeyError(f"Missing tissue_tests columns: {missing}")
+    duplicated = donor_summary.duplicated(
+        ["method", "scale", tissue_col, donor_col], keep=False
+    )
+    if duplicated.any():
+        raise ValueError(
+            "donor_summary must contain one row per donor, method, scale, and tissue."
+        )
+
+    if tissue_colors is None:
+        tissue_colors = {
+            "A": "#E8928F",
+            "B": "#7FAED2",
+            "V": "#82BFA0",
+            "None": "#B8B8B8",
+        }
+    if primary_scales is None:
+        primary_scales = {
+            "knn_continuum": 15,
+            "radius_continuum": 50,
+            "nearest_at2": 100,
+            "balanced_extremes": 50,
+        }
+    if method_config is None:
+        method_config = [
+            {
+                "method": "knn_continuum",
+                "scale": primary_scales.get("knn_continuum", 15),
+                "title": "kNN state coupling",
+                "subtitle": "AM MHCII score vs local AT2 VIM score; k = 15",
+                "xlabel": "Spearman ρ\nPositive = concordant MHCII–VIM states",
+                "primary": True,
+            },
+            {
+                "method": "radius_continuum",
+                "scale": primary_scales.get("radius_continuum", 50),
+                "title": "Fixed-radius state coupling",
+                "subtitle": "AM MHCII score vs local AT2 VIM score; 50 µm",
+                "xlabel": "Spearman ρ\nPositive = concordant MHCII–VIM states",
+                "primary": True,
+            },
+            {
+                "method": "nearest_at2",
+                "scale": primary_scales.get("nearest_at2", 100),
+                "title": "Nearest-AT2 state coupling",
+                "subtitle": "AM MHCII score vs nearest AT2 VIM score; ≤100 µm",
+                "xlabel": "Spearman ρ\nPositive = concordant MHCII–VIM states",
+                "primary": True,
+            },
+            {
+                "method": "balanced_extremes",
+                "scale": primary_scales.get("balanced_extremes", 50),
+                "title": "Balanced score extremes",
+                "subtitle": "Top minus bottom MHCII-score AMs; 50 µm",
+                "xlabel": (
+                    "Difference in local AT2 VIM score\n"
+                    "Positive = higher around MHCII-high AMs"
+                ),
+                "primary": False,
+            },
+        ]
+
+    donor_summary = donor_summary.copy()
+    tissue_tests = tissue_tests.copy()
+    available_methods = set(donor_summary["method"].dropna().astype(str).unique())
+    resolved_config = [
+        configuration for configuration in method_config
+        if configuration["method"] in available_methods
+    ]
+    if not resolved_config:
+        raise ValueError(
+            "None of the configured Stage 3 methods were found. "
+            f"Available methods are: {sorted(available_methods)}"
+        )
+
+    n_panels = len(resolved_config)
+    ncols = 2
+    nrows = int(np.ceil(n_panels / ncols))
+    if width_cm is None or height_cm is None:
+        figsize = (11.5, 4.4 * nrows)
+    else:
+        figsize = (width_cm / 2.54, height_cm / 2.54)
+    fig, axes = plt.subplots(
+        nrows=nrows, ncols=ncols, figsize=figsize, squeeze=False
+    )
+    axes_flat = axes.ravel()
+    rng = np.random.default_rng(random_state)
+    plotted_tables = []
+
+    for panel_index, configuration in enumerate(resolved_config):
+        ax = axes_flat[panel_index]
+        method = configuration["method"]
+        selected_scale = float(configuration["scale"])
+        panel_data = donor_summary.loc[
+            donor_summary["method"].eq(method)
+            & np.isclose(donor_summary["scale"].astype(float), selected_scale)
+            & donor_summary[tissue_col].isin(tissue_order)
+        ].copy()
+        if panel_data.empty:
+            ax.set_visible(False)
+            continue
+        plotted_tables.append(panel_data)
+        available_tissues = [
+            tissue for tissue in tissue_order
+            if panel_data[tissue_col].astype(str).eq(str(tissue)).any()
+        ]
+        y_positions = np.arange(len(available_tissues))[::-1]
+        all_effects, y_labels = [], []
+
+        for y, tissue in zip(y_positions, available_tissues):
+            tissue_data = panel_data.loc[
+                panel_data[tissue_col].astype(str).eq(str(tissue))
+            ].copy()
+            values = tissue_data[value_col].dropna().astype(float).to_numpy()
+            all_effects.extend(values.tolist())
+            color = tissue_colors.get(tissue, "#B8B8B8")
+            jitter = rng.uniform(-0.13, 0.13, size=len(values))
+            ax.scatter(
+                values, y + jitter, s=42, color=color,
+                edgecolor="#303030", linewidth=0.55, alpha=0.82, zorder=3,
+            )
+            if len(values):
+                median = float(np.median(values))
+                q25, q75 = np.quantile(values, [0.25, 0.75])
+                ax.plot(
+                    [q25, q75], [y, y], color="#303030", linewidth=2.2,
+                    solid_capstyle="round", zorder=4,
+                )
+                ax.scatter(
+                    median, y, marker="D", s=72, color=color,
+                    edgecolor="#151515", linewidth=1.1, zorder=5,
+                )
+            if show_donor_labels:
+                for _, row in tissue_data.iterrows():
+                    if pd.notna(row[value_col]):
+                        ax.text(
+                            row[value_col], y + rng.uniform(-0.11, 0.11),
+                            f" {row[donor_col]}", fontsize=6.5,
+                            va="center", color="#444444",
+                        )
+
+            test_match = tissue_tests.loc[
+                tissue_tests["method"].eq(method)
+                & np.isclose(tissue_tests["scale"].astype(float), selected_scale)
+                & tissue_tests[tissue_col].astype(str).eq(str(tissue))
+            ]
+            statistical_text = ""
+            if annotate_fdr and not test_match.empty:
+                q_column = next(
+                    (column for column in ("fdr_bh", "FDR")
+                     if column in test_match.columns and test_match[column].notna().any()),
+                    None,
+                )
+                if q_column is not None:
+                    q_value = float(test_match[q_column].dropna().iloc[0])
+                    statistical_text = (
+                        f"{_stage3_significance_label(q_value)}  q={q_value:.3g}"
+                    )
+                elif "p_value" in test_match.columns and test_match["p_value"].notna().any():
+                    p_value = float(test_match["p_value"].dropna().iloc[0])
+                    statistical_text = (
+                        f"{_stage3_significance_label(p_value)}  p={p_value:.3g}"
+                    )
+            if statistical_text:
+                ax.text(
+                    0.985, y, statistical_text,
+                    transform=ax.get_yaxis_transform(), ha="right", va="center",
+                    fontsize=8.3, color="#303030",
+                )
+            y_labels.append(f"{tissue}   (n={len(values)})")
+
+        ax.axvline(
+            0, color="#777777", linestyle=(0, (3, 3)), linewidth=1.0, zorder=1
+        )
+        if all_effects:
+            maximum = max(np.max(np.abs(all_effects)), 0.025)
+            ax.set_xlim(-1.25 * maximum, 1.60 * maximum)
+        ax.set_yticks(y_positions)
+        ax.set_yticklabels(y_labels, fontsize=9)
+        ax.set_xlabel(configuration["xlabel"], fontsize=9.5)
+        ax.set_title(
+            configuration["title"], fontsize=12, fontweight="bold", pad=19
+        )
+        ax.text(
+            0.5, 1.015, configuration["subtitle"], transform=ax.transAxes,
+            ha="center", va="bottom", fontsize=8.7,
+            color="#444444" if configuration["primary"] else "#777777",
+        )
+        if not configuration["primary"]:
+            ax.text(
+                0.02, 0.03, "Secondary cutoff-based analysis",
+                transform=ax.transAxes, ha="left", va="bottom",
+                fontsize=7.5, color="#777777", style="italic",
+            )
+        ax.grid(False)
+        ax.tick_params(axis="both", length=3, width=0.8, color="#444444")
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_color("#333333")
+        ax.spines["bottom"].set_color("#333333")
+
+    for panel_index in range(n_panels, len(axes_flat)):
+        axes_flat[panel_index].set_visible(False)
+    legend_handles = [
+        Line2D(
+            [0], [0], marker="o", linestyle="none",
+            markerfacecolor=tissue_colors.get(tissue, "#B8B8B8"),
+            markeredgecolor="#303030", markeredgewidth=0.6,
+            markersize=7, label=str(tissue),
+        )
+        for tissue in tissue_order
+    ]
+    fig.legend(
+        handles=legend_handles, title="Tissue annotation", loc="upper center",
+        bbox_to_anchor=(0.5, 1.005), ncol=len(tissue_order), frameon=False,
+    )
+    fig.suptitle(suptitle, fontsize=14, fontweight="bold", y=1.04)
+    fig.tight_layout(rect=(0, 0, 1, 0.965))
+    if save is not None:
+        path = Path(save)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    plot_data = (
+        pd.concat(plotted_tables, ignore_index=True)
+        if plotted_tables else pd.DataFrame()
+    )
+    return fig, axes, plot_data
+
+
+def plot_stage3_scale_sensitivity(
+    donor_summary,
+    tissue_tests=None,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    methods=("knn_continuum", "radius_continuum", "balanced_extremes"),
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    value_col="donor_effect",
+    suptitle="Sensitivity of AM MHCII–AT2 VIM coupling to neighborhood scale",
+    save=None,
+    dpi=300,
+):
+    """Stage 2-style median/IQR sensitivity plot across Stage 3 scales."""
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    required = {"method", "scale", "scale_type", tissue_col, donor_col, value_col}
+    missing = sorted(required.difference(donor_summary.columns))
+    if missing:
+        raise KeyError(f"Missing donor_summary columns: {missing}")
+    duplicated = donor_summary.duplicated(
+        ["method", "scale", tissue_col, donor_col], keep=False
+    )
+    if duplicated.any():
+        raise ValueError(
+            "donor_summary must contain one row per donor, method, scale, and tissue."
+        )
+    if tissue_colors is None:
+        tissue_colors = {
+            "A": "#E8928F",
+            "B": "#7FAED2",
+            "V": "#82BFA0",
+            "None": "#B8B8B8",
+        }
+
+    data = donor_summary.loc[
+        donor_summary["method"].isin(methods)
+        & donor_summary[tissue_col].isin(tissue_order)
+    ].copy()
+    summary = (
+        data.groupby(
+            ["method", "scale_type", "scale", tissue_col], observed=True
+        )[value_col]
+        .agg(
+            median="median",
+            q25=lambda values: values.quantile(0.25),
+            q75=lambda values: values.quantile(0.75),
+            n_donors="count",
+        )
+        .reset_index()
+    )
+    available_methods = [
+        method for method in methods if method in summary["method"].unique()
+    ]
+    if not available_methods:
+        raise ValueError("No multiscale Stage 3 methods were found.")
+
+    fig, axes = plt.subplots(
+        1, len(available_methods),
+        figsize=(5.0 * len(available_methods), 4.5), squeeze=False,
+    )
+    axes = axes.ravel()
+    title_map = {
+        "knn_continuum": "Continuous kNN state coupling",
+        "radius_continuum": "Continuous radius state coupling",
+        "balanced_extremes": "Balanced score extremes",
+        "categorical_pair_enrichment": "Four-state pair enrichment",
+        "categorical_knn": "Categorical kNN association",
+        "categorical_radius": "Categorical radius association",
+    }
+    for ax, method in zip(axes, available_methods):
+        panel = summary.loc[summary["method"].eq(method)].copy()
+        for tissue in tissue_order:
+            group = panel.loc[
+                panel[tissue_col].astype(str).eq(str(tissue))
+            ].sort_values("scale")
+            if group.empty:
+                continue
+            color = tissue_colors.get(tissue, "#B8B8B8")
+            x = group["scale"].to_numpy(float)
+            median = group["median"].to_numpy(float)
+            q25 = group["q25"].to_numpy(float)
+            q75 = group["q75"].to_numpy(float)
+            ax.fill_between(x, q25, q75, color=color, alpha=0.18, linewidth=0)
+            ax.plot(
+                x, median, color=color, marker="o", markersize=6,
+                linewidth=1.8, markeredgecolor="#303030",
+                markeredgewidth=0.55, label=str(tissue),
+            )
+        ax.axhline(
+            0, color="#777777", linestyle=(0, (3, 3)), linewidth=1
+        )
+        scale_type = panel["scale_type"].iloc[0] if not panel.empty else ""
+        xlabel = (
+            "Number of nearest neighbors"
+            if scale_type == "k_neighbors" else "Radius (µm)"
+        )
+        ax.set_xlabel(xlabel)
+        if method == "balanced_extremes":
+            ylabel = (
+                "Median donor difference in local AT2 VIM score\n"
+                "Positive = higher around MHCII-high AMs"
+            )
+        elif method == "categorical_pair_enrichment":
+            ylabel = (
+                "Median donor log concordance OR\n"
+                "Positive = same-state enrichment"
+            )
+        elif method in {"categorical_knn", "categorical_radius"}:
+            ylabel = (
+                "Median donor difference in VIMhi fraction\n"
+                "Positive = higher around MHCIIhi AMs"
+            )
+        else:
+            ylabel = (
+                "Median donor Spearman ρ\n"
+                "Positive = concordant MHCII–VIM states"
+            )
+        ax.set_ylabel(ylabel)
+        ax.set_title(title_map.get(method, method), fontsize=11, fontweight="bold")
+        ax.grid(False)
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+    handles = [
+        Line2D(
+            [0], [0], color=tissue_colors.get(tissue, "#B8B8B8"),
+            marker="o", markeredgecolor="#303030", linewidth=1.8,
+            label=str(tissue),
+        )
+        for tissue in tissue_order
+    ]
+    fig.legend(
+        handles=handles, title="Tissue annotation", loc="upper center",
+        bbox_to_anchor=(0.5, 1.03), ncol=len(tissue_order), frameon=False,
+    )
+    fig.suptitle(suptitle, fontsize=13, fontweight="bold", y=1.10)
+    fig.tight_layout()
+    if save is not None:
+        path = Path(save)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    return fig, axes, summary
+
+
+def plot_stage3_categorical_primary(
+    donor_summary,
+    tissue_tests,
+    *,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    primary_scales=None,
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    value_col="donor_effect",
+    show_donor_labels=False,
+    annotate_fdr=True,
+    random_state=321,
+    save=None,
+    dpi=300,
+):
+    """Stage 2-style 2×2 forest plot for categorical Stage 3 results."""
+    if primary_scales is None:
+        primary_scales = {
+            "categorical_pair_enrichment": 50,
+            "categorical_knn": 15,
+            "categorical_radius": 50,
+            "categorical_nearest_at2": 100,
+        }
+    method_config = [
+        {
+            "method": "categorical_pair_enrichment",
+            "scale": primary_scales["categorical_pair_enrichment"],
+            "title": "Four-state pair enrichment",
+            "subtitle": "MHCII/VIM state concordance among AM–AT2 pairs; 50 µm",
+            "xlabel": (
+                "Log concordance odds ratio\n"
+                "Positive = MHCIIhi–VIMhi and MHCIIlo–VIMlo enrichment"
+            ),
+            "primary": True,
+        },
+        {
+            "method": "categorical_knn",
+            "scale": primary_scales["categorical_knn"],
+            "title": "Categorical kNN association",
+            "subtitle": "VIMhi AT2 fraction around MHCIIhi vs MHCIIlo AMs; k = 15",
+            "xlabel": (
+                "Difference in local VIMhi fraction\n"
+                "Positive = higher around MHCIIhi AMs"
+            ),
+            "primary": True,
+        },
+        {
+            "method": "categorical_radius",
+            "scale": primary_scales["categorical_radius"],
+            "title": "Categorical radius association",
+            "subtitle": "VIMhi AT2 fraction around MHCIIhi vs MHCIIlo AMs; 50 µm",
+            "xlabel": (
+                "Difference in local VIMhi fraction\n"
+                "Positive = higher around MHCIIhi AMs"
+            ),
+            "primary": True,
+        },
+        {
+            "method": "categorical_nearest_at2",
+            "scale": primary_scales["categorical_nearest_at2"],
+            "title": "Nearest-AT2 categorical state",
+            "subtitle": "Nearest AT2 VIM state by AM MHCII state; ≤100 µm",
+            "xlabel": (
+                "Log odds ratio\n"
+                "Positive = MHCIIhi AMs preferentially pair with VIMhi AT2"
+            ),
+            "primary": True,
+        },
+    ]
+    return plot_stage3_primary(
+        donor_summary=donor_summary,
+        tissue_tests=tissue_tests,
+        tissue_order=tissue_order,
+        tissue_colors=tissue_colors,
+        method_config=method_config,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        value_col=value_col,
+        show_donor_labels=show_donor_labels,
+        annotate_fdr=annotate_fdr,
+        random_state=random_state,
+        suptitle="Categorical coupling between AM MHCII and AT2 VIM states",
+        save=save,
+        dpi=dpi,
+    )
+
+
+def plot_stage3_categorical_scale_sensitivity(
+    donor_summary,
+    *,
+    tissue_order=("A", "B", "V"),
+    tissue_colors=None,
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    value_col="donor_effect",
+    save=None,
+    dpi=300,
+):
+    """Median/IQR sensitivity plot for categorical pair, kNN and radius tests."""
+    return plot_stage3_scale_sensitivity(
+        donor_summary=donor_summary,
+        tissue_order=tissue_order,
+        tissue_colors=tissue_colors,
+        methods=(
+            "categorical_pair_enrichment",
+            "categorical_knn",
+            "categorical_radius",
+        ),
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        value_col=value_col,
+        suptitle=(
+            "Sensitivity of categorical AM MHCII–AT2 VIM coupling "
+            "to neighborhood scale"
+        ),
+        save=save,
+        dpi=dpi,
+    )
+
+
+def plot_stage3_categorical_pair_heatmap(
+    pair_results,
+    *,
+    scale=50,
+    tissue_order=("A", "B", "V"),
+    tissue_col="tissue_annotation",
+    donor_col="donor_id",
+    value="log2_oe",
+    cmap=None,
+    width_cm=15.0,
+    height_cm=5.2,
+    save=None,
+    dpi=300,
+):
+    """Plot donor-median four-state pair enrichment for each tissue.
+
+    ``value='log2_oe'`` displays log2 observed/expected pair counts;
+    ``value='z'`` displays permutation z-scores.
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
+
+    if value not in {"log2_oe", "z"}:
+        raise ValueError("value must be 'log2_oe' or 'z'.")
+    required_pairs = ("hi_hi", "hi_lo", "lo_hi", "lo_lo")
+    required = {"method", "scale", tissue_col, donor_col}
+    required.update(f"{value}_{pair}" for pair in required_pairs)
+    missing = sorted(required.difference(pair_results.columns))
+    if missing:
+        raise KeyError(f"Missing pair-result columns: {missing}")
+    data = pair_results.loc[
+        pair_results["method"].eq("categorical_pair_enrichment")
+        & np.isclose(pair_results["scale"].astype(float), float(scale))
+        & pair_results[tissue_col].isin(tissue_order)
+    ].copy()
+    if data.empty:
+        raise ValueError(f"No categorical pair results were found at scale={scale}.")
+
+    value_columns = [f"{value}_{pair}" for pair in required_pairs]
+    donor = (
+        data.groupby([tissue_col, donor_col], observed=True)[value_columns]
+        .mean()
+        .reset_index()
+    )
+    tissue_summary = (
+        donor.groupby(tissue_col, observed=True)[value_columns]
+        .median()
+        .reset_index()
+    )
+    if cmap is None:
+        cmap = LinearSegmentedColormap.from_list(
+            "macaron_diverging", ["#7FAED2", "#F7F7F7", "#E8928F"]
+        )
+    all_values = tissue_summary[value_columns].to_numpy(float)
+    finite = np.abs(all_values[np.isfinite(all_values)])
+    limit = float(np.max(finite)) if len(finite) else 1.0
+    limit = max(limit, 1e-6)
+    norm = TwoSlopeNorm(vmin=-limit, vcenter=0, vmax=limit)
+
+    cm = 1 / 2.54
+    fig, axes = plt.subplots(
+        1, len(tissue_order),
+        figsize=(width_cm * cm, height_cm * cm),
+        squeeze=False,
+    )
+    axes = axes.ravel()
+    image = None
+    for ax, tissue in zip(axes, tissue_order):
+        row = tissue_summary.loc[
+            tissue_summary[tissue_col].astype(str).eq(str(tissue))
+        ]
+        if row.empty:
+            ax.set_visible(False)
+            continue
+        row = row.iloc[0]
+        matrix = np.array(
+            [
+                [row[f"{value}_hi_hi"], row[f"{value}_hi_lo"]],
+                [row[f"{value}_lo_hi"], row[f"{value}_lo_lo"]],
+            ],
+            dtype=float,
+        )
+        image = ax.imshow(matrix, cmap=cmap, norm=norm, aspect="equal")
+        for i in range(2):
+            for j in range(2):
+                ax.text(
+                    j, i, f"{matrix[i, j]:.2f}",
+                    ha="center", va="center", fontsize=8,
+                    color="#202020",
+                )
+        ax.set_xticks([0, 1], labels=["VIMhi", "VIMlo"], fontsize=8)
+        ax.set_yticks([0, 1], labels=["MHCIIhi", "MHCIIlo"], fontsize=8)
+        ax.set_xlabel("AT2 state", fontsize=8.5)
+        ax.set_ylabel("AM state", fontsize=8.5)
+        ax.set_title(str(tissue), fontsize=10, fontweight="bold", pad=7)
+        ax.set_xticks(np.arange(-0.5, 2, 1), minor=True)
+        ax.set_yticks(np.arange(-0.5, 2, 1), minor=True)
+        ax.grid(which="minor", color="white", linewidth=1.5)
+        ax.tick_params(which="minor", bottom=False, left=False)
+        ax.tick_params(axis="both", length=0)
+    if image is not None:
+        colorbar = fig.colorbar(
+            image, ax=[ax for ax in axes if ax.get_visible()],
+            fraction=0.035, pad=0.04,
+        )
+        colorbar.set_label(
+            "Median donor log₂(observed/expected)"
+            if value == "log2_oe" else "Median donor permutation z-score",
+            fontsize=8.5,
+        )
+        colorbar.ax.tick_params(labelsize=8, length=3)
+    fig.suptitle(
+        f"Categorical AM MHCII–AT2 VIM pair enrichment · {float(scale):g} µm",
+        fontsize=11, fontweight="bold", y=1.02,
+    )
+    fig.subplots_adjust(left=0.08, right=0.88, bottom=0.20, top=0.80, wspace=0.45)
+    if save is not None:
+        path = Path(save)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(path, dpi=dpi, bbox_inches="tight", facecolor="white")
+    return fig, axes, tissue_summary
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
@@ -14609,6 +15402,10 @@ __all__ = [
     "plot_knn_niche_continuum",
     "plot_stage1A_niche_dotmap", "plot_stage1B_primary",
     "plot_stage2_primary", "plot_stage2_scale_sensitivity",
+    "plot_stage3_categorical_pair_heatmap",
+    "plot_stage3_categorical_primary",
+    "plot_stage3_categorical_scale_sensitivity",
+    "plot_stage3_primary", "plot_stage3_scale_sensitivity",
     "plot_core_contributions", "plot_mhcii_at2_spatial_core",
     "plot_macrophage_pct_by_tissue", "plot_metadata_summary",
     "plot_marker_dotplot", "plot_nhood_enrichment_donor_tissue",
@@ -14622,6 +15419,7 @@ __all__ = [
     "summarize_lr_by_donor", "summarise_lr_by_donor",
     "summarize_nhood_by_donor", "summarize_stage1_by_donor_and_tissue",
     "summarize_stage2_by_donor_and_tissue",
+    "summarize_stage3_by_donor_and_tissue",
     "test_continuous_mhcii_at2_proximity", "test_lr_across_donors",
     "run_spatial_function_multicore", "run_stage2_multicore",
     "run_stage3_all_methods", "run_stage3_multicore",
