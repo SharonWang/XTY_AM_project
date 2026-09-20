@@ -13351,7 +13351,19 @@ def _stage3_bh_fdr(p_values: Iterable[float]) -> np.ndarray:
 def _stage3_finish(rows: list[dict]) -> pd.DataFrame:
     result = pd.DataFrame(rows)
     if not result.empty and "p_value" in result:
-        result["fdr_bh"] = _stage3_bh_fdr(result["p_value"])
+        result["fdr_bh"] = np.nan
+        family = [
+            column
+            for column in ("method", "effect_name", "scale_type", "scale")
+            if column in result.columns
+        ]
+        for indices in result.groupby(
+            family, observed=True, dropna=False
+        ).groups.values():
+            indices = list(indices)
+            result.loc[indices, "fdr_bh"] = _stage3_bh_fdr(
+                result.loc[indices, "p_value"]
+            )
     return result
 
 
@@ -13894,6 +13906,674 @@ def run_stage3_multicore(
     return result.sort_values(sort_cols).reset_index(drop=True)
 
 
+def _stage3_categorical_validate_and_prepare(
+    adata,
+    *,
+    core_col,
+    donor_col,
+    tissue_col,
+    tissue,
+    celltype_col,
+    am_labels,
+    at2_labels,
+    x_col,
+    y_col,
+    mhcii_group_col,
+    mhcii_hi_label,
+    mhcii_lo_label,
+    vim_group_col,
+    vim_hi_label,
+    vim_lo_label,
+    coordinate_scale_to_um,
+):
+    required = {
+        core_col, donor_col, celltype_col, x_col, y_col,
+        mhcii_group_col, vim_group_col,
+    }
+    if tissue_col is not None:
+        required.add(tissue_col)
+    missing = sorted(required.difference(adata.obs.columns))
+    if missing:
+        raise KeyError(f"Missing adata.obs columns: {missing}")
+
+    if not np.isfinite(coordinate_scale_to_um) or coordinate_scale_to_um <= 0:
+        raise ValueError("coordinate_scale_to_um must be positive and finite.")
+    obs = adata.obs.copy()
+    if tissue is not None:
+        if tissue_col is None:
+            raise ValueError("tissue_col must be supplied when tissue is used.")
+        allowed = {str(tissue)} if isinstance(tissue, str) else set(map(str, tissue))
+        obs = obs.loc[obs[tissue_col].astype(str).isin(allowed)].copy()
+    for column in (x_col, y_col):
+        obs[column] = pd.to_numeric(obs[column], errors="coerce")
+    obs[x_col] = obs[x_col] * float(coordinate_scale_to_um)
+    obs[y_col] = obs[y_col] * float(coordinate_scale_to_um)
+    obs = obs.loc[obs[[x_col, y_col]].notna().all(axis=1)].copy()
+
+    celltype = obs[celltype_col].astype(str)
+    is_am = celltype.isin(map(str, am_labels))
+    is_at2 = celltype.isin(map(str, at2_labels))
+    mhcii = obs[mhcii_group_col].astype(str)
+    vim = obs[vim_group_col].astype(str)
+    valid_am = is_am & mhcii.isin([str(mhcii_hi_label), str(mhcii_lo_label)])
+    valid_at2 = is_at2 & vim.isin([str(vim_hi_label), str(vim_lo_label)])
+    # Keep every spatial cell for conventional all-cell kNN neighborhoods.
+    obs["_stage3_is_am"] = valid_am.to_numpy(bool)
+    obs["_stage3_is_at2"] = valid_at2.to_numpy(bool)
+    obs["_stage3_am_high"] = (
+        obs[mhcii_group_col].astype(str).eq(str(mhcii_hi_label))
+        & obs["_stage3_is_am"]
+    )
+    obs["_stage3_at2_high"] = (
+        obs[vim_group_col].astype(str).eq(str(vim_hi_label))
+        & obs["_stage3_is_at2"]
+    )
+    if not obs["_stage3_is_am"].any() and not obs["_stage3_is_at2"].any():
+        raise ValueError(
+            "No categorized MHCIIhi/MHCIIlo AMs or VIMhi/VIMlo AT2 cells remained."
+        )
+    return obs
+
+
+def _stage3_categorical_common_kwargs(
+    adata,
+    core_col,
+    donor_col,
+    tissue_col,
+    tissue,
+    celltype_col,
+    am_labels,
+    at2_labels,
+    x_col,
+    y_col,
+    mhcii_group_col,
+    mhcii_hi_label,
+    mhcii_lo_label,
+    vim_group_col,
+    vim_hi_label,
+    vim_lo_label,
+    coordinate_scale_to_um,
+):
+    return _stage3_categorical_validate_and_prepare(
+        adata,
+        core_col=core_col,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        tissue=tissue,
+        celltype_col=celltype_col,
+        am_labels=am_labels,
+        at2_labels=at2_labels,
+        x_col=x_col,
+        y_col=y_col,
+        mhcii_group_col=mhcii_group_col,
+        mhcii_hi_label=mhcii_hi_label,
+        mhcii_lo_label=mhcii_lo_label,
+        vim_group_col=vim_group_col,
+        vim_hi_label=vim_hi_label,
+        vim_lo_label=vim_lo_label,
+        coordinate_scale_to_um=coordinate_scale_to_um,
+    )
+
+
+def _stage3_categorical_counts(am_high, at2_high, neighbors):
+    # Rows: MHCIIlo, MHCIIhi. Columns: VIMlo, VIMhi.
+    counts = np.zeros((2, 2), dtype=float)
+    for am_index, at2_indices in enumerate(neighbors):
+        if len(at2_indices) == 0:
+            continue
+        row = int(am_high[am_index])
+        high_count = float(np.sum(at2_high[at2_indices]))
+        counts[row, 1] += high_count
+        counts[row, 0] += len(at2_indices) - high_count
+    return counts
+
+
+def _stage3_log_concordance_or(counts, correction=0.5):
+    corrected = np.asarray(counts, dtype=float) + float(correction)
+    # (MHCIIhi,VIMhi)*(MHCIIlo,VIMlo) /
+    # (MHCIIhi,VIMlo)*(MHCIIlo,VIMhi)
+    return float(
+        np.log(
+            (corrected[1, 1] * corrected[0, 0])
+            / (corrected[1, 0] * corrected[0, 1])
+        )
+    )
+
+
+def _stage3_categorical_make_balanced_indices(am_high, eligible, n_repeats, min_cells, rng):
+    high = np.flatnonzero(eligible & am_high)
+    low = np.flatnonzero(eligible & ~am_high)
+    n = min(len(high), len(low))
+    if n < min_cells:
+        return [], len(high), len(low)
+    selections = []
+    for _ in range(max(int(n_repeats), 1)):
+        selected_high = rng.choice(high, size=n, replace=False)
+        selected_low = rng.choice(low, size=n, replace=False)
+        selections.append((selected_high, selected_low))
+    return selections, len(high), len(low)
+
+
+def _stage3_categorical_balanced_fraction_difference(local_fraction, selections):
+    effects = [
+        np.mean(local_fraction[high]) - np.mean(local_fraction[low])
+        for high, low in selections
+    ]
+    return float(np.median(effects)) if effects else np.nan
+
+
+def _stage3_categorical_local_fraction(neighbors, at2_high):
+    counts = np.fromiter((len(index) for index in neighbors), dtype=int)
+    fraction = np.full(len(neighbors), np.nan, dtype=float)
+    for i, index in enumerate(neighbors):
+        if len(index):
+            fraction[i] = float(np.mean(at2_high[index]))
+    return fraction, counts
+
+
+def _stage3_categorical_qc_counts(core, celltype_col, am_labels, at2_labels):
+    celltype = core[celltype_col].astype(str)
+    n_am_all = int(celltype.isin(map(str, am_labels)).sum())
+    n_at2_all = int(celltype.isin(map(str, at2_labels)).sum())
+    n_am_categorized = int(core["_stage3_is_am"].sum())
+    n_at2_categorized = int(core["_stage3_is_at2"].sum())
+    return {
+        "n_am_total": n_am_all,
+        "n_am_categorized": n_am_categorized,
+        "n_am_excluded": n_am_all - n_am_categorized,
+        "am_retained_fraction": (
+            n_am_categorized / n_am_all if n_am_all else np.nan
+        ),
+        "n_at2_total": n_at2_all,
+        "n_at2_categorized": n_at2_categorized,
+        "n_at2_excluded": n_at2_all - n_at2_categorized,
+        "at2_retained_fraction": (
+            n_at2_categorized / n_at2_all if n_at2_all else np.nan
+        ),
+    }
+
+
+def calculate_stage3_categorical_pair_enrichment_by_core(
+    adata,
+    *,
+    radii=(25.0, 50.0, 100.0),
+    min_am_per_group=5,
+    min_at2_per_group=5,
+    odds_correction=0.5,
+    n_permutations=999,
+    random_state=1234,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_group_col="MHCII_group",
+    mhcii_hi_label="MHCIIhi",
+    mhcii_lo_label="MHCIIlo",
+    vim_group_col="AT2_VIM_group",
+    vim_hi_label="AT2_VIMhi",
+    vim_lo_label="AT2_VIMlo",
+    coordinate_scale_to_um=1.0,
+):
+    """Test four-state AM–AT2 pair enrichment at fixed radii.
+
+    The primary effect is the log concordance odds ratio. Pair-specific
+    observed counts, log2 observed/expected values, and permutation z-scores
+    are retained as wide columns for heatmap plotting. Because edge counts are
+    not independent cell replicates, interpret this diagnostic alongside the
+    per-AM local-fraction analyses and donor-level inference.
+    """
+    radii = tuple(sorted({float(value) for value in radii if float(value) > 0}))
+    obs = _stage3_categorical_common_kwargs(
+        adata, core_col, donor_col, tissue_col, tissue, celltype_col,
+        am_labels, at2_labels, x_col, y_col, mhcii_group_col,
+        mhcii_hi_label, mhcii_lo_label, vim_group_col, vim_hi_label, vim_lo_label,
+        coordinate_scale_to_um,
+    )
+    rows = []
+    pair_names = ((0, 0, "lo_lo"), (0, 1, "lo_hi"),
+                  (1, 0, "hi_lo"), (1, 1, "hi_hi"))
+    for core_key, core in _stage3_iter_cores(
+        obs, core_col, donor_col, tissue_col
+    ):
+        identity = core_key if isinstance(core_key, tuple) else (core_key,)
+        core_id = core[core_col].iloc[0]
+        am = core.loc[core["_stage3_is_am"]].copy()
+        at2 = core.loc[core["_stage3_is_at2"]].copy()
+        am_high = am["_stage3_am_high"].to_numpy(bool)
+        at2_high = at2["_stage3_at2_high"].to_numpy(bool)
+        if (
+            min(np.sum(am_high), np.sum(~am_high)) < min_am_per_group
+            or min(np.sum(at2_high), np.sum(~at2_high)) < min_at2_per_group
+        ):
+            continue
+        base = {
+            core_col: core_id,
+            **_stage3_core_metadata(core, donor_col, tissue_col),
+            **_stage3_categorical_qc_counts(core, celltype_col, am_labels, at2_labels),
+        }
+        tree = cKDTree(at2[[x_col, y_col]].to_numpy(float))
+        am_xy = am[[x_col, y_col]].to_numpy(float)
+        for radius in radii:
+            rng = np.random.default_rng(
+                _stage3_seed(
+                    random_state, *identity, "categorical_pair_enrichment", radius
+                )
+            )
+            neighbors = tree.query_ball_point(am_xy, r=radius)
+            observed_counts = _stage3_categorical_counts(am_high, at2_high, neighbors)
+            if observed_counts.sum() == 0:
+                continue
+            observed_effect = _stage3_log_concordance_or(observed_counts, odds_correction)
+            null_effect = np.empty(n_permutations, dtype=float)
+            null_counts = np.empty((n_permutations, 2, 2), dtype=float)
+            for permutation in range(n_permutations):
+                permuted = rng.permutation(at2_high)
+                counts = _stage3_categorical_counts(am_high, permuted, neighbors)
+                null_counts[permutation] = counts
+                null_effect[permutation] = _stage3_log_concordance_or(
+                    counts, odds_correction
+                )
+            output = {
+                **base,
+                "method": "categorical_pair_enrichment",
+                "scale_type": "radius_um",
+                "scale": radius,
+                "effect": observed_effect,
+                "effect_name": "log_concordance_odds_ratio",
+                "n_mhcii_hi": int(np.sum(am_high)),
+                "n_mhcii_lo": int(np.sum(~am_high)),
+                "n_vim_hi": int(np.sum(at2_high)),
+                "n_vim_lo": int(np.sum(~at2_high)),
+                "n_pairs": int(observed_counts.sum()),
+                **_stage3_permutation_summary(observed_effect, null_effect),
+            }
+            for row_index, col_index, pair in pair_names:
+                observed_pair = observed_counts[row_index, col_index]
+                pair_null = null_counts[:, row_index, col_index]
+                expected = float(np.mean(pair_null))
+                null_sd = float(np.std(pair_null, ddof=1))
+                output[f"observed_{pair}"] = observed_pair
+                output[f"expected_{pair}"] = expected
+                output[f"log2_oe_{pair}"] = float(
+                    np.log2((observed_pair + 0.5) / (expected + 0.5))
+                )
+                output[f"z_{pair}"] = (
+                    (observed_pair - expected) / null_sd if null_sd > 0 else np.nan
+                )
+            rows.append(output)
+    return _stage3_finish(rows)
+
+
+def _stage3_categorical_continuum_core(
+    adata,
+    *,
+    method,
+    scales,
+    scale_type,
+    neighbor_builder,
+    min_at2_neighbors,
+    min_am_per_group,
+    balance_am_groups,
+    n_balance_repeats,
+    n_permutations,
+    random_state,
+    core_col,
+    donor_col,
+    tissue_col,
+    tissue,
+    celltype_col,
+    am_labels,
+    at2_labels,
+    x_col,
+    y_col,
+    mhcii_group_col,
+    mhcii_hi_label,
+    mhcii_lo_label,
+    vim_group_col,
+    vim_hi_label,
+    vim_lo_label,
+    coordinate_scale_to_um,
+):
+    obs = _stage3_categorical_common_kwargs(
+        adata, core_col, donor_col, tissue_col, tissue, celltype_col,
+        am_labels, at2_labels, x_col, y_col, mhcii_group_col,
+        mhcii_hi_label, mhcii_lo_label, vim_group_col, vim_hi_label, vim_lo_label,
+        coordinate_scale_to_um,
+    )
+    rows = []
+    for core_key, core in _stage3_iter_cores(
+        obs, core_col, donor_col, tissue_col
+    ):
+        identity = core_key if isinstance(core_key, tuple) else (core_key,)
+        core_id = core[core_col].iloc[0]
+        am = core.loc[core["_stage3_is_am"]].copy()
+        at2 = core.loc[core["_stage3_is_at2"]].copy()
+        if am.empty or at2.empty:
+            continue
+        base = {
+            core_col: core_id,
+            **_stage3_core_metadata(core, donor_col, tissue_col),
+            **_stage3_categorical_qc_counts(core, celltype_col, am_labels, at2_labels),
+        }
+        am_high = am["_stage3_am_high"].to_numpy(bool)
+        at2_high = at2["_stage3_at2_high"].to_numpy(bool)
+        built = neighbor_builder(core, am, at2, scales, x_col, y_col)
+        for scale, neighbors in built:
+            rng = np.random.default_rng(
+                _stage3_seed(random_state, *identity, method, scale)
+            )
+            local, counts = _stage3_categorical_local_fraction(neighbors, at2_high)
+            eligible = np.isfinite(local) & (counts >= min_at2_neighbors)
+            if balance_am_groups:
+                selections, n_high, n_low = _stage3_categorical_make_balanced_indices(
+                    am_high, eligible, n_balance_repeats,
+                    min_am_per_group, rng,
+                )
+            else:
+                high = np.flatnonzero(eligible & am_high)
+                low = np.flatnonzero(eligible & ~am_high)
+                n_high, n_low = len(high), len(low)
+                selections = [(high, low)] if min(n_high, n_low) >= min_am_per_group else []
+            if not selections:
+                continue
+            observed = _stage3_categorical_balanced_fraction_difference(local, selections)
+            null = np.empty(n_permutations, dtype=float)
+            for permutation in range(n_permutations):
+                permuted_local, _ = _stage3_categorical_local_fraction(
+                    neighbors, rng.permutation(at2_high)
+                )
+                null[permutation] = _stage3_categorical_balanced_fraction_difference(
+                    permuted_local, selections
+                )
+            rows.append({
+                **base,
+                "method": method,
+                "scale_type": scale_type,
+                "scale": float(scale),
+                "effect": observed,
+                "effect_name": "difference_in_local_vimhi_fraction",
+                "n_mhcii_hi_analyzed": n_high,
+                "n_mhcii_lo_analyzed": n_low,
+                "n_am_analyzed": n_high + n_low,
+                "coverage_fraction": (n_high + n_low) / len(am),
+                "median_at2_neighbors": float(np.median(counts[eligible])),
+                "balance_am_groups": bool(balance_am_groups),
+                "n_balance_repeats": int(n_balance_repeats),
+                **_stage3_permutation_summary(observed, null),
+            })
+    return _stage3_finish(rows)
+
+
+def calculate_stage3_categorical_knn_by_core(
+    adata,
+    *,
+    k_values=(5, 15, 30),
+    neighbor_pool="all",
+    min_at2_neighbors=3,
+    min_am_per_group=5,
+    balance_am_groups=True,
+    n_balance_repeats=100,
+    n_permutations=999,
+    random_state=1234,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_group_col="MHCII_group",
+    mhcii_hi_label="MHCIIhi",
+    mhcii_lo_label="MHCIIlo",
+    vim_group_col="AT2_VIM_group",
+    vim_hi_label="AT2_VIMhi",
+    vim_lo_label="AT2_VIMlo",
+    coordinate_scale_to_um=1.0,
+):
+    """Compare local VIMhi fractions between categorical MHCII AM states."""
+    if neighbor_pool not in {"all", "at2_only"}:
+        raise ValueError("neighbor_pool must be 'all' or 'at2_only'.")
+    k_values = tuple(sorted({int(value) for value in k_values if int(value) > 0}))
+
+    def build(core, am, at2, scales, x_name, y_name):
+        am_xy = am[[x_name, y_name]].to_numpy(float)
+        if neighbor_pool == "at2_only":
+            pool_xy = at2[[x_name, y_name]].to_numpy(float)
+            pool_is_at2 = np.ones(len(at2), dtype=bool)
+            pool_at2_index = np.arange(len(at2))
+        else:
+            am_pool_indices = core.index.get_indexer(am.index)
+            core = core.reset_index(drop=True)
+            pool_xy = core[[x_name, y_name]].to_numpy(float)
+            pool_is_at2 = core["_stage3_is_at2"].to_numpy(bool)
+            pool_at2_index = np.full(len(core), -1, dtype=int)
+            pool_at2_index[np.flatnonzero(pool_is_at2)] = np.arange(len(at2))
+        tree = cKDTree(pool_xy)
+        output = []
+        for k in scales:
+            query_k = min(int(k) + (neighbor_pool == "all"), len(pool_xy))
+            _, indices = tree.query(am_xy, k=query_k)
+            indices = np.asarray(indices)
+            if indices.ndim == 1:
+                indices = indices[:, None]
+            neighbors = []
+            if neighbor_pool == "all":
+                for focal_pool_index, row in zip(am_pool_indices, indices):
+                    other = row[row != focal_pool_index][: int(k)]
+                    retained = other[pool_is_at2[other]]
+                    neighbors.append(pool_at2_index[retained])
+            else:
+                for row in indices:
+                    retained = row[: int(k)]
+                    neighbors.append(pool_at2_index[retained])
+            output.append((k, neighbors))
+        return output
+
+    return _stage3_categorical_continuum_core(
+        adata,
+        method="categorical_knn",
+        scales=k_values,
+        scale_type="k_neighbors",
+        neighbor_builder=build,
+        min_at2_neighbors=min_at2_neighbors,
+        min_am_per_group=min_am_per_group,
+        balance_am_groups=balance_am_groups,
+        n_balance_repeats=n_balance_repeats,
+        n_permutations=n_permutations,
+        random_state=random_state,
+        core_col=core_col,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        tissue=tissue,
+        celltype_col=celltype_col,
+        am_labels=am_labels,
+        at2_labels=at2_labels,
+        x_col=x_col,
+        y_col=y_col,
+        mhcii_group_col=mhcii_group_col,
+        mhcii_hi_label=mhcii_hi_label,
+        mhcii_lo_label=mhcii_lo_label,
+        vim_group_col=vim_group_col,
+        vim_hi_label=vim_hi_label,
+        vim_lo_label=vim_lo_label,
+        coordinate_scale_to_um=coordinate_scale_to_um,
+    )
+
+
+def calculate_stage3_categorical_radius_by_core(
+    adata,
+    *,
+    radii=(25.0, 50.0, 100.0),
+    min_at2_neighbors=3,
+    min_am_per_group=5,
+    balance_am_groups=True,
+    n_balance_repeats=100,
+    n_permutations=999,
+    random_state=1234,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_group_col="MHCII_group",
+    mhcii_hi_label="MHCIIhi",
+    mhcii_lo_label="MHCIIlo",
+    vim_group_col="AT2_VIM_group",
+    vim_hi_label="AT2_VIMhi",
+    vim_lo_label="AT2_VIMlo",
+    coordinate_scale_to_um=1.0,
+):
+    """Compare VIMhi fractions within fixed radii around MHCIIhi/lo AMs."""
+    radii = tuple(sorted({float(value) for value in radii if float(value) > 0}))
+
+    def build(core, am, at2, scales, x_name, y_name):
+        tree = cKDTree(at2[[x_name, y_name]].to_numpy(float))
+        am_xy = am[[x_name, y_name]].to_numpy(float)
+        return [
+            (radius, tree.query_ball_point(am_xy, r=radius))
+            for radius in scales
+        ]
+
+    return _stage3_categorical_continuum_core(
+        adata,
+        method="categorical_radius",
+        scales=radii,
+        scale_type="radius_um",
+        neighbor_builder=build,
+        min_at2_neighbors=min_at2_neighbors,
+        min_am_per_group=min_am_per_group,
+        balance_am_groups=balance_am_groups,
+        n_balance_repeats=n_balance_repeats,
+        n_permutations=n_permutations,
+        random_state=random_state,
+        core_col=core_col,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        tissue=tissue,
+        celltype_col=celltype_col,
+        am_labels=am_labels,
+        at2_labels=at2_labels,
+        x_col=x_col,
+        y_col=y_col,
+        mhcii_group_col=mhcii_group_col,
+        mhcii_hi_label=mhcii_hi_label,
+        mhcii_lo_label=mhcii_lo_label,
+        vim_group_col=vim_group_col,
+        vim_hi_label=vim_hi_label,
+        vim_lo_label=vim_lo_label,
+        coordinate_scale_to_um=coordinate_scale_to_um,
+    )
+
+
+def calculate_stage3_categorical_nearest_at2_by_core(
+    adata,
+    *,
+    max_distance=100.0,
+    min_am_per_group=5,
+    odds_correction=0.5,
+    n_permutations=999,
+    random_state=1234,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_group_col="MHCII_group",
+    mhcii_hi_label="MHCIIhi",
+    mhcii_lo_label="MHCIIlo",
+    vim_group_col="AT2_VIM_group",
+    vim_hi_label="AT2_VIMhi",
+    vim_lo_label="AT2_VIMlo",
+    coordinate_scale_to_um=1.0,
+):
+    """Test whether nearest-AT2 VIM state depends on categorical AM state."""
+    obs = _stage3_categorical_common_kwargs(
+        adata, core_col, donor_col, tissue_col, tissue, celltype_col,
+        am_labels, at2_labels, x_col, y_col, mhcii_group_col,
+        mhcii_hi_label, mhcii_lo_label, vim_group_col, vim_hi_label, vim_lo_label,
+        coordinate_scale_to_um,
+    )
+    rows = []
+    for core_key, core in _stage3_iter_cores(
+        obs, core_col, donor_col, tissue_col
+    ):
+        identity = core_key if isinstance(core_key, tuple) else (core_key,)
+        core_id = core[core_col].iloc[0]
+        am = core.loc[core["_stage3_is_am"]].copy()
+        at2 = core.loc[core["_stage3_is_at2"]].copy()
+        if am.empty or at2.empty:
+            continue
+        distance, nearest = cKDTree(
+            at2[[x_col, y_col]].to_numpy(float)
+        ).query(am[[x_col, y_col]].to_numpy(float), k=1)
+        eligible = np.ones(len(am), dtype=bool)
+        if max_distance is not None:
+            eligible &= distance <= max_distance
+        am_high = am["_stage3_am_high"].to_numpy(bool)[eligible]
+        nearest_index = nearest[eligible]
+        if min(np.sum(am_high), np.sum(~am_high)) < min_am_per_group:
+            continue
+        at2_high = at2["_stage3_at2_high"].to_numpy(bool)
+        nearest_high = at2_high[nearest_index]
+        counts = np.zeros((2, 2), dtype=float)
+        for a, v in zip(am_high, nearest_high):
+            counts[int(a), int(v)] += 1
+        observed = _stage3_log_concordance_or(counts, odds_correction)
+        rng = np.random.default_rng(
+            _stage3_seed(
+                random_state, *identity, "categorical_nearest_at2", max_distance
+            )
+        )
+        null = np.empty(n_permutations, dtype=float)
+        for permutation in range(n_permutations):
+            permuted_nearest = rng.permutation(at2_high)[nearest_index]
+            permuted_counts = np.zeros((2, 2), dtype=float)
+            for a, v in zip(am_high, permuted_nearest):
+                permuted_counts[int(a), int(v)] += 1
+            null[permutation] = _stage3_log_concordance_or(
+                permuted_counts, odds_correction
+            )
+        base = {
+            core_col: core_id,
+            **_stage3_core_metadata(core, donor_col, tissue_col),
+            **_stage3_categorical_qc_counts(core, celltype_col, am_labels, at2_labels),
+        }
+        rows.append({
+            **base,
+            "method": "categorical_nearest_at2",
+            "scale_type": "max_distance_um",
+            "scale": np.inf if max_distance is None else float(max_distance),
+            "effect": observed,
+            "effect_name": "log_nearest_at2_odds_ratio",
+            "n_am_analyzed": int(np.sum(eligible)),
+            "n_mhcii_hi_analyzed": int(np.sum(am_high)),
+            "n_mhcii_lo_analyzed": int(np.sum(~am_high)),
+            "coverage_fraction": float(np.mean(eligible)),
+            "median_nearest_distance": float(np.median(distance[eligible])),
+            "observed_lo_lo": counts[0, 0],
+            "observed_lo_hi": counts[0, 1],
+            "observed_hi_lo": counts[1, 0],
+            "observed_hi_hi": counts[1, 1],
+            **_stage3_permutation_summary(observed, null),
+        })
+    return _stage3_finish(rows)
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
@@ -13911,6 +14591,10 @@ __all__ = [
     "calculate_stage2_nearest_at2_by_core",
     "calculate_stage2_radius_continuum_by_core",
     "calculate_stage3_balanced_extremes_by_core",
+    "calculate_stage3_categorical_knn_by_core",
+    "calculate_stage3_categorical_nearest_at2_by_core",
+    "calculate_stage3_categorical_pair_enrichment_by_core",
+    "calculate_stage3_categorical_radius_by_core",
     "calculate_stage3_knn_continuum_by_core",
     "calculate_stage3_nearest_at2_by_core",
     "calculate_stage3_radius_continuum_by_core",

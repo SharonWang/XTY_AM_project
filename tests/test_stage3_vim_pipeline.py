@@ -74,6 +74,68 @@ def make_tied_stage3_adata():
     return adata
 
 
+def make_categorical_stage3_adata(
+    *,
+    discordant: bool = True,
+    include_ambiguous: bool = False,
+    one_am_group: bool = False,
+):
+    """Return categorical AM/AT2 states with known local pairing."""
+    rows = []
+    am_groups = ["MHCIIlo", "MHCIIlo", "MHCIIhi", "MHCIIhi"]
+    if one_am_group:
+        am_groups = ["MHCIIhi"] * 4
+    vim_groups = (
+        ["AT2_VIMhi", "AT2_VIMhi", "AT2_VIMlo", "AT2_VIMlo"]
+        if discordant
+        else ["AT2_VIMlo", "AT2_VIMlo", "AT2_VIMhi", "AT2_VIMhi"]
+    )
+    for index, group in enumerate(am_groups):
+        rows.append(
+            {
+                "donor_id": "D1",
+                "tissue_annotation": "A",
+                "core_id": "C1",
+                "CellType_refined": "AM",
+                "x_centroid": index * 10.0,
+                "y_centroid": 0.0,
+                "MHCII_group": group,
+                "AT2_VIM_group": pd.NA,
+            }
+        )
+    for index, group in enumerate(vim_groups):
+        rows.append(
+            {
+                "donor_id": "D1",
+                "tissue_annotation": "A",
+                "core_id": "C1",
+                "CellType_refined": "AT2",
+                "x_centroid": index * 10.0 + 0.5,
+                "y_centroid": 0.0,
+                "MHCII_group": pd.NA,
+                "AT2_VIM_group": group,
+            }
+        )
+    if include_ambiguous:
+        rows.extend(
+            [
+                {
+                    "donor_id": "D1", "tissue_annotation": "A", "core_id": "C1",
+                    "CellType_refined": "AM", "x_centroid": 40.0, "y_centroid": 0.0,
+                    "MHCII_group": "Ambiguous", "AT2_VIM_group": pd.NA,
+                },
+                {
+                    "donor_id": "D1", "tissue_annotation": "A", "core_id": "C1",
+                    "CellType_refined": "AT2", "x_centroid": 40.5, "y_centroid": 0.0,
+                    "MHCII_group": pd.NA, "AT2_VIM_group": "Ambiguous",
+                },
+            ]
+        )
+    obs = pd.DataFrame(rows)
+    obs.index = [f"categorical_{index}" for index in range(len(obs))]
+    return SimpleNamespace(obs=obs, n_obs=len(obs))
+
+
 def test_stage3_reused_core_ids_remain_separate_by_donor():
     """Identical core labels in different donors must never be pooled."""
     result = pipeline.calculate_stage3_radius_continuum_by_core(
@@ -149,3 +211,42 @@ def test_stage3_multicore_seed_is_stable_when_unrelated_core_is_removed():
         full.loc[full["donor_id"].eq("D1"), columns].reset_index(drop=True),
         subset.loc[:, columns].reset_index(drop=True),
     )
+
+
+def test_stage3_categorical_pair_effect_is_negative_for_discordant_pairing():
+    """Discordant MHCII/VIM pairings must produce a negative log odds ratio."""
+    result = pipeline.calculate_stage3_categorical_pair_enrichment_by_core(
+        make_categorical_stage3_adata(discordant=True),
+        radii=(3,),
+        min_am_per_group=2,
+        min_at2_per_group=2,
+        n_permutations=19,
+    )
+    assert result.iloc[0]["effect"] < 0
+    assert result.iloc[0]["effect_name"] == "log_concordance_odds_ratio"
+
+
+def test_stage3_categorical_reports_ambiguous_cell_exclusion():
+    """Ambiguous AM and AT2 states must be reported as exclusions."""
+    result = pipeline.calculate_stage3_categorical_radius_by_core(
+        make_categorical_stage3_adata(include_ambiguous=True),
+        radii=(3,),
+        min_at2_neighbors=1,
+        min_am_per_group=2,
+        n_balance_repeats=5,
+        n_permutations=19,
+    )
+    row = result.iloc[0]
+    assert row["n_am_excluded"] > 0
+    assert row["n_at2_excluded"] > 0
+    assert 0 < row["am_retained_fraction"] < 1
+
+
+def test_stage3_categorical_nearest_requires_both_am_groups():
+    """A categorical contrast is undefined when one AM state is absent."""
+    result = pipeline.calculate_stage3_categorical_nearest_at2_by_core(
+        make_categorical_stage3_adata(one_am_group=True),
+        min_am_per_group=2,
+        n_permutations=19,
+    )
+    assert result.empty
