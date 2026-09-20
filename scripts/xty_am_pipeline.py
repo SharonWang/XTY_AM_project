@@ -13197,6 +13197,703 @@ def score_and_assign_two_signatures(
     return adata
 
 
+class _Stage3ObsOnly:
+    """Small pickle-friendly AnnData-like carrier used by the multicore runner."""
+
+    def __init__(self, obs: pd.DataFrame):
+        self.obs = obs
+
+
+def _stage3_group_columns(core_col, donor_col, tissue_col):
+    """Return the columns that jointly identify one independent spatial core."""
+    return [donor_col] + ([tissue_col] if tissue_col is not None else []) + [core_col]
+
+
+def _stage3_iter_cores(obs, core_col, donor_col, tissue_col):
+    """Yield cores without pooling reused core labels across donors or tissues."""
+    columns = _stage3_group_columns(core_col, donor_col, tissue_col)
+    yield from obs.groupby(columns, observed=True, dropna=False, sort=True)
+
+
+def _stage3_seed(master_seed, *identity):
+    """Derive a stable uint32 seed from the analysis identity."""
+    payload = "|".join(map(str, (master_seed, *identity))).encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:4], "little")
+
+
+def _stage3_validate_and_prepare(
+    adata,
+    *,
+    core_col: str,
+    donor_col: str,
+    tissue_col: str | None,
+    tissue,
+    celltype_col: str,
+    am_labels: Sequence[str],
+    at2_labels: Sequence[str],
+    x_col: str,
+    y_col: str,
+    mhcii_score_col: str,
+    vim_score_col: str,
+    coordinate_scale_to_um: float,
+) -> pd.DataFrame:
+    required = {
+        core_col,
+        donor_col,
+        celltype_col,
+        x_col,
+        y_col,
+        mhcii_score_col,
+        vim_score_col,
+    }
+    if tissue_col is not None:
+        required.add(tissue_col)
+    missing = sorted(required.difference(adata.obs.columns))
+    if missing:
+        raise KeyError(f"Missing adata.obs columns: {missing}")
+
+    if not np.isfinite(coordinate_scale_to_um) or coordinate_scale_to_um <= 0:
+        raise ValueError("coordinate_scale_to_um must be positive and finite.")
+    obs = adata.obs.copy()
+    if tissue is not None:
+        if tissue_col is None:
+            raise ValueError("tissue_col must be supplied when tissue is used.")
+        allowed = {str(tissue)} if isinstance(tissue, str) else set(map(str, tissue))
+        obs = obs.loc[obs[tissue_col].astype(str).isin(allowed)].copy()
+
+    for column in (x_col, y_col, mhcii_score_col, vim_score_col):
+        obs[column] = pd.to_numeric(obs[column], errors="coerce")
+    obs[x_col] = obs[x_col] * float(coordinate_scale_to_um)
+    obs[y_col] = obs[y_col] * float(coordinate_scale_to_um)
+
+    # Retain all spatial cells so neighbor_pool='all' truly means every cell;
+    # only score-bearing AMs and AT2 cells receive analysis flags.
+    is_am = obs[celltype_col].astype(str).isin(map(str, am_labels))
+    is_at2 = obs[celltype_col].astype(str).isin(map(str, at2_labels))
+    valid_am = is_am & obs[mhcii_score_col].notna()
+    valid_at2 = is_at2 & obs[vim_score_col].notna()
+    obs = obs.loc[obs[[x_col, y_col]].notna().all(axis=1)].copy()
+    obs["_stage3_is_am"] = valid_am.loc[obs.index].to_numpy(bool)
+    obs["_stage3_is_at2"] = valid_at2.loc[obs.index].to_numpy(bool)
+    if not obs["_stage3_is_am"].any() and not obs["_stage3_is_at2"].any():
+        raise ValueError("No usable AM or AT2 cells remained after filtering.")
+    return obs
+
+
+def _stage3_core_metadata(core: pd.DataFrame, donor_col: str, tissue_col: str | None) -> dict:
+    donors = core[donor_col].dropna().unique()
+    if len(donors) > 1:
+        raise ValueError(f"Core contains multiple donors: {donors[:5].tolist()}")
+    output = {donor_col: donors[0] if len(donors) else np.nan}
+    if tissue_col is not None:
+        tissues = core[tissue_col].dropna().unique()
+        if len(tissues) > 1:
+            raise ValueError(f"Core contains multiple tissues: {tissues[:5].tolist()}")
+        output[tissue_col] = tissues[0] if len(tissues) else np.nan
+    return output
+
+
+def _stage3_local_means(neighbor_indices: list[np.ndarray], at2_scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    counts = np.fromiter((len(index) for index in neighbor_indices), dtype=int)
+    means = np.full(len(neighbor_indices), np.nan, dtype=float)
+    for i, index in enumerate(neighbor_indices):
+        if len(index):
+            means[i] = float(np.mean(at2_scores[index]))
+    return means, counts
+
+
+def _stage3_safe_spearman(x: np.ndarray, y: np.ndarray, min_am: int) -> tuple[float, int]:
+    valid = np.isfinite(x) & np.isfinite(y)
+    n = int(valid.sum())
+    if n < min_am or np.ptp(x[valid]) == 0 or np.ptp(y[valid]) == 0:
+        return np.nan, n
+    return float(spearmanr(x[valid], y[valid]).statistic), n
+
+
+def _stage3_permutation_summary(observed: float, null: np.ndarray) -> dict:
+    null = np.asarray(null, dtype=float)
+    null = null[np.isfinite(null)]
+    if not np.isfinite(observed) or len(null) == 0:
+        return {
+            "null_mean": np.nan,
+            "null_sd": np.nan,
+            "z_score": np.nan,
+            "p_value": np.nan,
+            "n_valid_permutations": len(null),
+        }
+    null_mean = float(np.mean(null))
+    null_sd = float(np.std(null, ddof=1)) if len(null) > 1 else np.nan
+    centered_observed = abs(observed - null_mean)
+    centered_null = np.abs(null - null_mean)
+    p_value = (1 + np.sum(centered_null >= centered_observed)) / (len(null) + 1)
+    return {
+        "null_mean": null_mean,
+        "null_sd": null_sd,
+        "z_score": (observed - null_mean) / null_sd if null_sd > 0 else np.nan,
+        "p_value": float(p_value),
+        "n_valid_permutations": len(null),
+    }
+
+
+def _stage3_bh_fdr(p_values: Iterable[float]) -> np.ndarray:
+    p = np.asarray(list(p_values), dtype=float)
+    q = np.full(len(p), np.nan)
+    valid = np.flatnonzero(np.isfinite(p))
+    if not len(valid):
+        return q
+    order = valid[np.argsort(p[valid])]
+    ranked = p[order] * len(order) / np.arange(1, len(order) + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    q[order] = np.clip(ranked, 0, 1)
+    return q
+
+
+def _stage3_finish(rows: list[dict]) -> pd.DataFrame:
+    result = pd.DataFrame(rows)
+    if not result.empty and "p_value" in result:
+        result["fdr_bh"] = _stage3_bh_fdr(result["p_value"])
+    return result
+
+
+def _stage3_format_probability(value, prefix="FDR"):
+    if not np.isfinite(value):
+        return ""
+    if value < 0.001:
+        return f"{prefix}<0.001"
+    if value < 0.01:
+        return f"{prefix}={value:.3f}"
+    return f"{prefix}={value:.2f}"
+
+
+def _stage3_common_kwargs(
+    adata,
+    core_col,
+    donor_col,
+    tissue_col,
+    tissue,
+    celltype_col,
+    am_labels,
+    at2_labels,
+    x_col,
+    y_col,
+    mhcii_score_col,
+    vim_score_col,
+    coordinate_scale_to_um,
+):
+    return _stage3_validate_and_prepare(
+        adata,
+        core_col=core_col,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        tissue=tissue,
+        celltype_col=celltype_col,
+        am_labels=am_labels,
+        at2_labels=at2_labels,
+        x_col=x_col,
+        y_col=y_col,
+        mhcii_score_col=mhcii_score_col,
+        vim_score_col=vim_score_col,
+        coordinate_scale_to_um=coordinate_scale_to_um,
+    )
+
+
+def calculate_stage3_balanced_extremes_by_core(
+    adata,
+    *,
+    radii=(25.0, 50.0, 100.0),
+    extreme_fraction=0.25,
+    radius=None,
+    lower_quantile=None,
+    upper_quantile=None,
+    min_at2_neighbors=3,
+    min_extreme_cells=5,
+    min_am_per_extreme=None,
+    n_permutations=999,
+    random_state=1234,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_score_col="MHCIIhi_score",
+    vim_score_col="AT2_VIM_score",
+    coordinate_scale_to_um=1.0,
+):
+    """Compare local AT2 VIM scores around balanced low/high MHCII AM tails.
+
+    The effect is mean(local AT2 VIM | MHCII-high tail) minus
+    mean(local AT2 VIM | MHCII-low tail).  Equal numbers of AMs are retained
+    from the two most extreme tails within every core.
+    """
+    # ``radius`` and explicit quantiles remain accepted for backward
+    # compatibility, while the Stage 2-style API uses radii/extreme_fraction.
+    if radius is not None:
+        radii = (float(radius),)
+    radii = tuple(sorted({float(value) for value in radii if float(value) > 0}))
+    if lower_quantile is None:
+        lower_quantile = extreme_fraction
+    if upper_quantile is None:
+        upper_quantile = 1 - extreme_fraction
+    if min_am_per_extreme is not None:
+        min_extreme_cells = min_am_per_extreme
+    if not 0 < extreme_fraction <= 0.5:
+        raise ValueError("extreme_fraction must lie in (0, 0.5].")
+    if not 0 <= lower_quantile < upper_quantile <= 1:
+        raise ValueError("Require 0 <= lower_quantile < upper_quantile <= 1.")
+    obs = _stage3_common_kwargs(
+        adata, core_col, donor_col, tissue_col, tissue, celltype_col,
+        am_labels, at2_labels, x_col, y_col, mhcii_score_col, vim_score_col,
+        coordinate_scale_to_um,
+    )
+    rows = []
+    for core_key, core in _stage3_iter_cores(
+        obs, core_col, donor_col, tissue_col
+    ):
+        identity = core_key if isinstance(core_key, tuple) else (core_key,)
+        core_id = core[core_col].iloc[0]
+        am = core.loc[core["_stage3_is_am"]].copy()
+        at2 = core.loc[core["_stage3_is_at2"]].copy()
+        base = {core_col: core_id, **_stage3_core_metadata(core, donor_col, tissue_col)}
+        if len(am) < 2 * min_extreme_cells or at2.empty:
+            continue
+        am_score = am[mhcii_score_col].to_numpy(float)
+        order = np.argsort(am_score, kind="mergesort")
+        n_tail = min(int(np.floor(len(order) * extreme_fraction)), len(order) // 2)
+        if n_tail < min_extreme_cells:
+            continue
+        values = am_score[order]
+        if (
+            values[n_tail - 1] == values[n_tail]
+            or values[-n_tail] == values[-n_tail - 1]
+        ):
+            continue
+        low, high = order[:n_tail], order[-n_tail:]
+        selected = np.concatenate([low, high])
+        group = np.concatenate([np.zeros(n_tail, int), np.ones(n_tail, int)])
+        am_xy = am[[x_col, y_col]].to_numpy(float)[selected]
+        at2_xy = at2[[x_col, y_col]].to_numpy(float)
+        at2_tree = cKDTree(at2_xy)
+        at2_scores = at2[vim_score_col].to_numpy(float)
+        for current_radius in radii:
+            neighbors = at2_tree.query_ball_point(am_xy, r=current_radius)
+            local, counts = _stage3_local_means(neighbors, at2_scores)
+            valid = (counts >= min_at2_neighbors) & np.isfinite(local)
+            n_low = int(np.sum(valid & (group == 0)))
+            n_high = int(np.sum(valid & (group == 1)))
+            if min(n_low, n_high) < min_extreme_cells:
+                continue
+            observed = float(
+                np.mean(local[valid & (group == 1)])
+                - np.mean(local[valid & (group == 0)])
+            )
+            rng = np.random.default_rng(
+                _stage3_seed(
+                    random_state,
+                    *identity,
+                    "balanced_extremes",
+                    current_radius,
+                )
+            )
+            null = []
+            for _ in range(n_permutations):
+                permuted_local, _ = _stage3_local_means(
+                    neighbors, rng.permutation(at2_scores)
+                )
+                null.append(
+                    np.mean(permuted_local[valid & (group == 1)])
+                    - np.mean(permuted_local[valid & (group == 0)])
+                )
+            rows.append({
+                **base,
+                "method": "balanced_extremes",
+                "scale_type": "radius_um",
+                "scale": current_radius,
+                "effect": observed,
+                "effect_name": "mean_local_VIM_high_minus_low_MHCII",
+                "n_am_total": len(am),
+                "n_at2_total": len(at2),
+                "n_am_analyzed": int(valid.sum()),
+                "n_am_low": n_low,
+                "n_am_high": n_high,
+                "median_at2_neighbors": float(np.median(counts[valid])),
+                **_stage3_permutation_summary(observed, np.asarray(null)),
+            })
+    return _stage3_finish(rows)
+
+
+def calculate_stage3_knn_continuum_by_core(
+    adata,
+    *,
+    k_values=(10, 20, 50),
+    min_at2_neighbors=3,
+    min_am=10,
+    n_permutations=999,
+    random_state=1234,
+    neighbor_pool="all",
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_score_col="MHCIIhi_score",
+    vim_score_col="AT2_VIM_score",
+    coordinate_scale_to_um=1.0,
+):
+    """Correlate AM MHCII score with mean AT2 VIM in kNN neighborhoods.
+
+    ``neighbor_pool='all'`` defines k among all retained AM/AT2 cells, matching
+    a conventional tissue-neighborhood analysis. ``'at2_only'`` instead uses
+    each AM's k nearest AT2 cells and answers a different question.
+    """
+    if neighbor_pool not in {"all", "at2_only"}:
+        raise ValueError("neighbor_pool must be 'all' or 'at2_only'.")
+    k_values = tuple(sorted({int(k) for k in k_values if int(k) > 0}))
+    obs = _stage3_common_kwargs(
+        adata, core_col, donor_col, tissue_col, tissue, celltype_col,
+        am_labels, at2_labels, x_col, y_col, mhcii_score_col, vim_score_col,
+        coordinate_scale_to_um,
+    )
+    rows = []
+    for core_key, core in _stage3_iter_cores(
+        obs, core_col, donor_col, tissue_col
+    ):
+        identity = core_key if isinstance(core_key, tuple) else (core_key,)
+        core_id = core[core_col].iloc[0]
+        core = core.reset_index(drop=True)
+        am = core.loc[core["_stage3_is_am"]].copy()
+        at2 = core.loc[core["_stage3_is_at2"]].copy()
+        if len(am) < min_am or at2.empty:
+            continue
+        base = {core_col: core_id, **_stage3_core_metadata(core, donor_col, tissue_col)}
+        am_xy = am[[x_col, y_col]].to_numpy(float)
+        at2_xy = at2[[x_col, y_col]].to_numpy(float)
+        at2_scores = at2[vim_score_col].to_numpy(float)
+        mhcii = am[mhcii_score_col].to_numpy(float)
+
+        if neighbor_pool == "at2_only":
+            pool_xy = at2_xy
+            pool_is_at2 = np.ones(len(at2), bool)
+            pool_at2_index = np.arange(len(at2))
+            am_pool_indices = None
+        else:
+            pool_xy = core[[x_col, y_col]].to_numpy(float)
+            pool_is_at2 = core["_stage3_is_at2"].to_numpy(bool)
+            pool_at2_index = np.full(len(core), -1, int)
+            pool_at2_index[np.flatnonzero(pool_is_at2)] = np.arange(len(at2))
+            am_pool_indices = am.index.to_numpy(dtype=int)
+
+        tree = cKDTree(pool_xy)
+        for k in k_values:
+            query_k = min(int(k) + (neighbor_pool == "all"), len(pool_xy))
+            _, raw_indices = tree.query(am_xy, k=query_k)
+            raw_indices = np.asarray(raw_indices)
+            if raw_indices.ndim == 1:
+                raw_indices = raw_indices[:, None]
+            neighbors = []
+            if neighbor_pool == "all":
+                for focal_pool_index, row_index in zip(
+                    am_pool_indices, raw_indices
+                ):
+                    other = row_index[row_index != focal_pool_index][: int(k)]
+                    retained = other[pool_is_at2[other]]
+                    neighbors.append(pool_at2_index[retained])
+            else:
+                for row_index in raw_indices:
+                    retained = row_index[: int(k)]
+                    neighbors.append(pool_at2_index[retained])
+            local, counts = _stage3_local_means(neighbors, at2_scores)
+            local[counts < min_at2_neighbors] = np.nan
+            observed, n_analyzed = _stage3_safe_spearman(mhcii, local, min_am)
+            if not np.isfinite(observed):
+                continue
+            rng = np.random.default_rng(
+                _stage3_seed(random_state, *identity, "knn_continuum", k)
+            )
+            null = []
+            for _ in range(n_permutations):
+                permuted_local, _ = _stage3_local_means(neighbors, rng.permutation(at2_scores))
+                permuted_local[counts < min_at2_neighbors] = np.nan
+                null.append(_stage3_safe_spearman(mhcii, permuted_local, min_am)[0])
+            valid_counts = counts[np.isfinite(local)]
+            rows.append({
+                **base,
+                "method": "knn_continuum",
+                "neighbor_pool": neighbor_pool,
+                "scale_type": "k_neighbors",
+                "scale": k,
+                "effect": observed,
+                "effect_name": "spearman_rho",
+                "n_am_total": len(am),
+                "n_at2_total": len(at2),
+                "n_am_analyzed": n_analyzed,
+                "median_at2_neighbors": float(np.median(valid_counts)),
+                **_stage3_permutation_summary(observed, np.asarray(null)),
+            })
+    return _stage3_finish(rows)
+
+
+def calculate_stage3_radius_continuum_by_core(
+    adata,
+    *,
+    radii=(25.0, 50.0, 100.0),
+    min_at2_neighbors=3,
+    min_am=10,
+    n_permutations=999,
+    random_state=1234,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_score_col="MHCIIhi_score",
+    vim_score_col="AT2_VIM_score",
+    coordinate_scale_to_um=1.0,
+):
+    """Correlate AM MHCII score with mean AT2 VIM within each radius."""
+    radii = tuple(sorted({float(radius) for radius in radii if float(radius) > 0}))
+    obs = _stage3_common_kwargs(
+        adata, core_col, donor_col, tissue_col, tissue, celltype_col,
+        am_labels, at2_labels, x_col, y_col, mhcii_score_col, vim_score_col,
+        coordinate_scale_to_um,
+    )
+    rows = []
+    for core_key, core in _stage3_iter_cores(
+        obs, core_col, donor_col, tissue_col
+    ):
+        identity = core_key if isinstance(core_key, tuple) else (core_key,)
+        core_id = core[core_col].iloc[0]
+        am = core.loc[core["_stage3_is_am"]].copy()
+        at2 = core.loc[core["_stage3_is_at2"]].copy()
+        if len(am) < min_am or at2.empty:
+            continue
+        base = {core_col: core_id, **_stage3_core_metadata(core, donor_col, tissue_col)}
+        am_xy = am[[x_col, y_col]].to_numpy(float)
+        at2_xy = at2[[x_col, y_col]].to_numpy(float)
+        at2_tree = cKDTree(at2_xy)
+        at2_scores = at2[vim_score_col].to_numpy(float)
+        mhcii = am[mhcii_score_col].to_numpy(float)
+        for radius in radii:
+            neighbors = at2_tree.query_ball_point(am_xy, r=radius)
+            local, counts = _stage3_local_means(neighbors, at2_scores)
+            local[counts < min_at2_neighbors] = np.nan
+            observed, n_analyzed = _stage3_safe_spearman(mhcii, local, min_am)
+            if not np.isfinite(observed):
+                continue
+            rng = np.random.default_rng(
+                _stage3_seed(random_state, *identity, "radius_continuum", radius)
+            )
+            null = []
+            for _ in range(n_permutations):
+                permuted_local, _ = _stage3_local_means(neighbors, rng.permutation(at2_scores))
+                permuted_local[counts < min_at2_neighbors] = np.nan
+                null.append(_stage3_safe_spearman(mhcii, permuted_local, min_am)[0])
+            valid_counts = counts[np.isfinite(local)]
+            rows.append({
+                **base,
+                "method": "radius_continuum",
+                "scale_type": "radius_um",
+                "scale": radius,
+                "effect": observed,
+                "effect_name": "spearman_rho",
+                "n_am_total": len(am),
+                "n_at2_total": len(at2),
+                "n_am_analyzed": n_analyzed,
+                "coverage_fraction": n_analyzed / len(am),
+                "median_at2_neighbors": float(np.median(valid_counts)),
+                **_stage3_permutation_summary(observed, np.asarray(null)),
+            })
+    return _stage3_finish(rows)
+
+
+def calculate_stage3_nearest_at2_by_core(
+    adata,
+    *,
+    max_distance=100.0,
+    min_am=10,
+    n_permutations=999,
+    random_state=1234,
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    x_col="x_centroid",
+    y_col="y_centroid",
+    mhcii_score_col="MHCIIhi_score",
+    vim_score_col="AT2_VIM_score",
+    coordinate_scale_to_um=1.0,
+):
+    """Correlate each AM MHCII score with its nearest AT2 cell's VIM score."""
+    obs = _stage3_common_kwargs(
+        adata, core_col, donor_col, tissue_col, tissue, celltype_col,
+        am_labels, at2_labels, x_col, y_col, mhcii_score_col, vim_score_col,
+        coordinate_scale_to_um,
+    )
+    rows = []
+    for core_key, core in _stage3_iter_cores(
+        obs, core_col, donor_col, tissue_col
+    ):
+        identity = core_key if isinstance(core_key, tuple) else (core_key,)
+        core_id = core[core_col].iloc[0]
+        am = core.loc[core["_stage3_is_am"]].copy()
+        at2 = core.loc[core["_stage3_is_at2"]].copy()
+        if len(am) < min_am or at2.empty:
+            continue
+        base = {core_col: core_id, **_stage3_core_metadata(core, donor_col, tissue_col)}
+        distance, nearest = cKDTree(at2[[x_col, y_col]].to_numpy(float)).query(
+            am[[x_col, y_col]].to_numpy(float), k=1
+        )
+        at2_scores = at2[vim_score_col].to_numpy(float)
+        nearest_vim = at2_scores[nearest].astype(float)
+        if max_distance is not None:
+            nearest_vim[distance > max_distance] = np.nan
+        mhcii = am[mhcii_score_col].to_numpy(float)
+        observed, n_analyzed = _stage3_safe_spearman(mhcii, nearest_vim, min_am)
+        if not np.isfinite(observed):
+            continue
+        rng = np.random.default_rng(
+            _stage3_seed(random_state, *identity, "nearest_at2", max_distance)
+        )
+        null = []
+        for _ in range(n_permutations):
+            permuted_nearest = rng.permutation(at2_scores)[nearest].astype(float)
+            if max_distance is not None:
+                permuted_nearest[distance > max_distance] = np.nan
+            null.append(_stage3_safe_spearman(mhcii, permuted_nearest, min_am)[0])
+        valid = np.isfinite(nearest_vim)
+        rows.append({
+            **base,
+            "method": "nearest_at2",
+            "scale_type": "max_distance_um",
+            "scale": np.inf if max_distance is None else float(max_distance),
+            "effect": observed,
+            "effect_name": "spearman_rho",
+            "n_am_total": len(am),
+            "n_at2_total": len(at2),
+            "n_am_analyzed": n_analyzed,
+            "coverage_fraction": n_analyzed / len(am),
+            "median_nearest_distance": float(np.median(distance[valid])),
+            "q90_nearest_distance": float(np.quantile(distance[valid], 0.90)),
+            **_stage3_permutation_summary(observed, np.asarray(null)),
+        })
+    return _stage3_finish(rows)
+
+
+def run_stage3_all_methods(adata, **common_kwargs):
+    """Run all four analyses and return a dictionary of tidy core tables.
+
+    Method-specific arguments should be supplied in the matching nested dict:
+    ``balanced_kwargs``, ``knn_kwargs``, ``radius_kwargs``, or
+    ``nearest_kwargs``. Remaining arguments are passed to all four functions.
+    """
+    common_kwargs = dict(common_kwargs)
+    balanced_kwargs = common_kwargs.pop("balanced_kwargs", {})
+    knn_kwargs = common_kwargs.pop("knn_kwargs", {})
+    radius_kwargs = common_kwargs.pop("radius_kwargs", {})
+    nearest_kwargs = common_kwargs.pop("nearest_kwargs", {})
+    def merged(specific):
+        return {**common_kwargs, **specific}
+
+    return {
+        "balanced_extremes": calculate_stage3_balanced_extremes_by_core(
+            adata, **merged(balanced_kwargs)
+        ),
+        "knn_continuum": calculate_stage3_knn_continuum_by_core(
+            adata, **merged(knn_kwargs)
+        ),
+        "radius_continuum": calculate_stage3_radius_continuum_by_core(
+            adata, **merged(radius_kwargs)
+        ),
+        "nearest_at2": calculate_stage3_nearest_at2_by_core(
+            adata, **merged(nearest_kwargs)
+        ),
+    }
+
+
+def run_stage3_multicore(
+    analysis_function,
+    adata,
+    *,
+    n_jobs=1,
+    random_state=1234,
+    verbose=0,
+    **analysis_kwargs,
+):
+    """Run one Stage 3 core-level function in parallel across spatial cores.
+
+    Only ``adata.obs`` is sent to workers because the Stage 3 calculations do
+    not use the expression matrix. This substantially reduces worker memory.
+    A reproducible, distinct random seed is assigned to every core.
+    """
+    from joblib import Parallel, delayed
+
+    core_col = analysis_kwargs.get("core_col", "core_id")
+    donor_col = analysis_kwargs.get("donor_col", "donor_id")
+    tissue_col = analysis_kwargs.get("tissue_col", "tissue_annotation")
+    required = [core_col, donor_col]
+    if tissue_col is not None:
+        required.append(tissue_col)
+    missing = [column for column in required if column not in adata.obs.columns]
+    if missing:
+        raise KeyError(f"Missing grouping columns for multicore run: {missing}")
+
+    # A core ID need not be globally unique, so donor/tissue remain part of
+    # the split key whenever available.
+    group_cols = [donor_col]
+    if tissue_col is not None:
+        group_cols.append(tissue_col)
+    group_cols.append(core_col)
+    groups = [
+        (key if isinstance(key, tuple) else (key,), group.copy())
+        for key, group in adata.obs.groupby(
+            group_cols, observed=True, dropna=False, sort=True
+        )
+    ]
+    seeds = [
+        _stage3_seed(random_state, *key, analysis_function.__name__)
+        for key, _ in groups
+    ]
+
+    def run_one(group_obs, seed):
+        kwargs = {**analysis_kwargs, "random_state": seed}
+        return analysis_function(_Stage3ObsOnly(group_obs), **kwargs)
+
+    if n_jobs == 1:
+        pieces = [
+            run_one(group, seed)
+            for (_, group), seed in zip(groups, seeds)
+        ]
+    else:
+        pieces = Parallel(n_jobs=n_jobs, verbose=verbose, backend="loky")(
+            delayed(run_one)(group, seed)
+            for (_, group), seed in zip(groups, seeds)
+        )
+    pieces = [piece for piece in pieces if piece is not None and not piece.empty]
+    if not pieces:
+        return pd.DataFrame()
+    result = pd.concat(pieces, ignore_index=True, sort=False)
+    sort_cols = [
+        column
+        for column in ["method", "scale", tissue_col, donor_col, core_col]
+        if column is not None and column in result.columns
+    ]
+    return result.sort_values(sort_cols).reset_index(drop=True)
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
@@ -13213,6 +13910,10 @@ __all__ = [
     "calculate_stage2_knn_continuum_by_core",
     "calculate_stage2_nearest_at2_by_core",
     "calculate_stage2_radius_continuum_by_core",
+    "calculate_stage3_balanced_extremes_by_core",
+    "calculate_stage3_knn_continuum_by_core",
+    "calculate_stage3_nearest_at2_by_core",
+    "calculate_stage3_radius_continuum_by_core",
     "calculate_nhood_enrichment_by_core", "calculate_radius_niche_continuum",
     "calculate_continuous_spatial_lr", "calculate_lr_for_core_arrays",
     "cluster_expression_summary", "compute_program_scores",
@@ -13239,5 +13940,6 @@ __all__ = [
     "summarize_stage2_by_donor_and_tissue",
     "test_continuous_mhcii_at2_proximity", "test_lr_across_donors",
     "run_spatial_function_multicore", "run_stage2_multicore",
+    "run_stage3_all_methods", "run_stage3_multicore",
     "validate_xenium_metadata",
 ]
