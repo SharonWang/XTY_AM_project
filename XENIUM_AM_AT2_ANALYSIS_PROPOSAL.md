@@ -4,10 +4,10 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial\Spatial`
-**Version:** 1.4
-**Status:** Notebook 00, Stage 1/2 spatial functions and influence diagnostics, validated Spatial CellChat export, and exploratory continuous AM–AT2 ligand–receptor functions are implemented and locally validated; awaiting scientific review of annotation evidence and a versioned human ligand–receptor resource
+**Version:** 1.5
+**Status:** Notebook 00, Stage 1/2 spatial functions and influence diagnostics, Stage 3 continuous/categorical AM MHCII–AT2 VIM coupling functions, validated Spatial CellChat export, and exploratory continuous AM–AT2 ligand–receptor functions are implemented and locally validated; awaiting scientific review of annotation evidence and a versioned human ligand–receptor resource
 **Created:** 2026-09-12
-**Last updated:** 2026-09-18
+**Last updated:** 2026-09-20
 
 ## Document control
 
@@ -307,6 +307,42 @@ supportive cores from distinct donors together with a typical and a
 discordant/near-null core, but this selection is labelled non-inferential and
 cannot replace the complete donor analysis.
 
+Stage 3 tests AM MHCII state against AT2 VIM state without changing the AM or
+AT2 identity definitions established upstream. The primary exposure and
+outcome are continuous: within each donor × tissue × core, correlate AM MHCII
+score with mean AT2 VIM score among k nearest cells, mean AT2 VIM score inside
+fixed physical radii, and the VIM score of the nearest eligible AT2. A
+tie-safe balanced-tail mean difference is secondary. Cell locations and
+neighborhood membership remain fixed while AT2 VIM scores are permuted within
+the same core. All-cell kNN explicitly removes the focal AM itself.
+
+Categorical MHCIIhi/MHCIIlo and AT2 VIMhi/VIMlo tests are sensitivity
+analyses: four-state edge-count concordance, local VIMhi fractions in kNN and
+radius neighborhoods, and nearest-AT2 state. Ambiguous cells remain in the
+spatial background but are excluded from the relevant state contrast, with
+retained and excluded fractions reported. Pair-count odds ratios are not
+treated as independent edge-level inference and must agree with per-AM local
+fractions and donor summaries.
+
+Stage 3 retains the natural effect sign. Negative continuous effects indicate
+that higher-MHCII AMs associate with lower-VIM AT2, matching the
+manuscript-derived working hypothesis that adapted MHCII-high AMs are closer
+to canonical/VIM-low rather than transitional/VIM-high AT2. This direction is
+an inference from the manuscript biology, not a VIM-specific result directly
+tested by Xu et al.; consequently the default donor signed-rank test is
+two-sided. A one-sided `less` test is permitted only when prospectively
+declared. Correlations are averaged equally across a donor's cores on the
+Fisher-z scale; differences and log odds ratios are averaged on their native
+scale. One donor estimate enters each tissue test, and FDR is controlled across
+tissues within each method × effect × scale family.
+
+The MHCII-high proportion-versus-age figure is exploratory. Its numerator is
+MHCIIhi AMs and its denominator is all AMs, including MHCIIlo, ambiguous, and
+unassigned states. Donors are the independent model units; core points are
+descriptive. The grouped quasibinomial fit uses a residual-degrees-of-freedom
+t reference but does not replace a prespecified mixed/beta-binomial model for
+the final manuscript.
+
 ### Phase 6 - AM-AT2 communication potential
 
 Phase 6 has two separate analysis tracks that must not be conflated:
@@ -531,6 +567,12 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | Tested AM counts weight Stage 2 donor influence estimates | Retain cell counts as precision/QC diagnostics only; use equal-core aggregation within each donor so large cores do not dominate biological inference. Match the primary arithmetic estimator by default and report Fisher-z aggregation only as a sensitivity. |
 | Supportive spatial cores are mistaken for an unbiased result | Label selected maps as illustrative, require distinct donors for the strongest supportive examples, include typical and discordant/near-null context, and base every claim on the complete donor analysis. |
 | Omitting a single-core donor is described as pure core influence | Report `removes_donor` and the remaining donor count for every leave-one-core-out result, and interpret donor-level leave-one-out analysis alongside it. |
+| Reused `core_id` values pool different donors | Define every Stage 3 core by donor × tissue × core and derive random seeds from that complete identity. |
+| kNN counts the focal AM as its own neighbor | Query one additional all-cell neighbor, remove the focal row explicitly, then retain the requested k cells. |
+| Tied MHCII scores are forced into opposite Stage 3 tails | Reject any core whose selected high or low tail boundary splits equal scores. |
+| The VIM-specific direction is presented as published fact | Label negative MHCII–VIM coupling as a manuscript-derived hypothesis and use a two-sided donor test by default. |
+| Categorical exclusions hide poor state coverage | Report categorized, excluded, and retained fractions for AM and AT2 in every core result. |
+| Core points in the age figure are treated as replicates | Fit the exploratory grouped model to donor counts only and display core points as descriptive context. |
 
 ## Decision gates before implementation
 
@@ -560,3 +602,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 1.2 | 2026-09-17 | Status; Phase 5 figures; source API; README; validation | Added the supplied primary Stage 2 donor plot and scale-sensitivity plot with the macaron tissue palette. Corrected malformed significance notation to conventional one-to-four stars, required unique donor rows and unique tissue-test annotations, documented the balanced-tail panel as secondary, and added synthetic plotting/file-output regression tests. | Produces immediately inspectable donor-level primary and sensitivity figures without pseudoreplication or silent duplicate weighting. |
 | 1.3 | 2026-09-18 | Status; Phase 6; statistical principles; risks; source API; README; validation | Added tie-safe MHCII extremes and CellChat labels; strict sparse Spatial CellChat export with explicit normalized/log1p scale and micrometre-coordinate contracts; simple-pair panel auditing; uniform/Gaussian radius weighting; bidirectional continuous spatial LR co-occurrence with complete provenance checks, positive coordinate-scale validation, serial/thread/process execution, stable core/pair permutation seeds, and diagnostic within-family FDR; equal-core Fisher-z donor summaries; and two-sided donor Wilcoxon tests with family-specific FDR. Explicitly separated formal R CellChat from exploratory Python co-occurrence, preserved missing statistics for untestable pairs, and flagged MHCII-score gene overlap. | Makes Notebook 04/HPC communication analysis reproducible while preventing pseudo-replication, missing donor provenance, collapsed coordinates, arbitrary tie splitting, unit/normalization ambiguity, unsupported complex handling, score circularity, and overstatement of Python co-occurrence as causal signalling. |
 | 1.4 | 2026-09-18 | Status; Phase 5 robustness; risks; source API; README; validation | Added leave-one-core-out and leave-one-donor-out Stage 2 influence rankings, renamed the new influence-based selector to `select_supportive_cores` to preserve the existing audit-oriented `select_representative_cores`, retained the supplied contribution and continuous-MHCII spatial plots, and documented selected maps as non-inferential. Replaced proposed tested-AM weighting with equal-core donor aggregation, aligned the default arithmetic estimator and one-sided test with the primary Stage 2 analysis, retained Fisher-z/two-sided analysis as an explicit sensitivity, and flagged core omissions that also remove donors. | Provides transparent robustness diagnostics and representative spatial maps without overwriting an existing function, allowing large cores to dominate donor inference, or presenting supportive examples as the inferential dataset. |
+| 1.5 | 2026-09-20 | Status; Phase 5 Stage 3; Phase 7 age; risks; source API; README; validation | Added reusable UMAP and dual-signature utilities; continuous and categorical AM MHCII–AT2 VIM spatial methods; stable donor/tissue/core seeds; tie-safe tails; self-excluding kNN; donor-equal inference with family-scoped FDR; macaron primary, scale, categorical, and spatial-state figures; and an exploratory donor-level MHCIIhi age plot. Preserved supplied plotting geometry and clarified that negative MHCII–VIM coupling is a manuscript-derived hypothesis rather than a published VIM-specific result. | Provides an HPC-ready, locally validated Stage 3 analysis while preventing cross-donor core pooling, self-neighbor bias, arbitrary tied splits, cell/core pseudoreplication, hidden categorical exclusions, and overstatement of the age or VIM-direction findings. |

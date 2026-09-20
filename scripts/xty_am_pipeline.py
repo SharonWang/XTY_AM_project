@@ -11535,6 +11535,38 @@ def plot_mhcii_at2_spatial_core(
     ``at2_display='group'`` colors AT2 cells using ``at2_group_col`` and
     ``at2_group_colors``. Missing assignments are shown as
     ``unassigned_at2_label`` rather than silently removed.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object containing cell metadata and spatial coordinates.
+    core_id, output_dir, file_prefix
+        Core to plot and PDF output location/name prefix.
+    core_col, donor_col, tissue_col, celltype_col, score_col, spatial_key
+        Metadata columns and spatial-coordinate key.
+    am_labels, at2_labels
+        Values identifying alveolar macrophages and AT2 cells.
+    at2_display
+        ``"all"`` for a single AT2 class or ``"group"`` for AT2-state colors.
+    at2_group_col, at2_group_order, at2_group_colors
+        AT2-state column, optional order, and optional color overrides.
+    unassigned_at2_label
+        Display label for AT2 cells lacking a state assignment.
+    low_score_color, midpoint_color, high_score_color, at2_color, background_color
+        Supplied macaron plot colors.
+    point_size, at2_point_size, background_size
+        Scatter-point sizes.
+    score_quantiles, score_limits
+        Shared AM color limits from quantiles or explicit ``(vmin, vmax)``.
+    show_at2_counts, legend_outside
+        Whether legends show group counts and sit outside the spatial panel.
+    invert_y, show, dpi
+        Coordinate orientation, display behavior, and saved resolution.
+
+    Returns
+    -------
+    pathlib.Path
+        Path to the saved PDF.
     """
     if at2_display not in {"all", "group"}:
         raise ValueError("at2_display must be either 'all' or 'group'.")
@@ -11548,9 +11580,18 @@ def plot_mhcii_at2_spatial_core(
         raise KeyError(f"adata.obsm[{spatial_key!r}] is missing.")
 
     obs = adata.obs.copy()
-    coordinates = np.asarray(adata.obsm[spatial_key])[:, :2]
-    if coordinates.shape[0] != len(obs):
-        raise ValueError("Spatial coordinates and adata.obs have different row counts.")
+    coordinates = np.asarray(adata.obsm[spatial_key], dtype=float)
+    if (
+        coordinates.ndim != 2
+        or coordinates.shape[0] != len(obs)
+        or coordinates.shape[1] < 2
+    ):
+        raise ValueError(
+            "Spatial coordinates must match cells and contain x/y columns."
+        )
+    if not np.isfinite(coordinates[:, :2]).all():
+        raise ValueError("Spatial x/y coordinates must be finite.")
+    coordinates = coordinates[:, :2]
 
     core_id = str(core_id)
     core_values = obs[core_col].astype(str)
@@ -13571,12 +13612,36 @@ def calculate_stage3_balanced_extremes_by_core(
     The effect is mean(local AT2 VIM | MHCII-high tail) minus
     mean(local AT2 VIM | MHCII-low tail).  Equal numbers of AMs are retained
     from the two most extreme tails within every core.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object whose ``obs`` contains cell identity, donor,
+        tissue, core, coordinates, AM MHCII scores, and AT2 VIM scores.
+    radii
+        Physical radii in micrometres after applying
+        ``coordinate_scale_to_um``.
+    extreme_fraction
+        Fraction selected from each score tail; tied boundaries are rejected.
+    min_at2_neighbors, min_extreme_cells
+        Minimum local AT2 coverage and analyzed AMs in each tail.
+    n_permutations, random_state
+        Number of within-core AT2-score permutations and master seed.
+    coordinate_scale_to_um
+        Positive multiplier converting the coordinate columns to micrometres.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per donor/tissue/core/radius with the signed score difference,
+        coverage diagnostics, and diagnostic permutation statistics.
     """
     # ``radius`` and explicit quantiles remain accepted for backward
     # compatibility, while the Stage 2-style API uses radii/extreme_fraction.
     if radius is not None:
         radii = (float(radius),)
     radii = tuple(sorted({float(value) for value in radii if float(value) > 0}))
+    explicit_quantiles = lower_quantile is not None or upper_quantile is not None
     if lower_quantile is None:
         lower_quantile = extreme_fraction
     if upper_quantile is None:
@@ -13604,17 +13669,45 @@ def calculate_stage3_balanced_extremes_by_core(
         if len(am) < 2 * min_extreme_cells or at2.empty:
             continue
         am_score = am[mhcii_score_col].to_numpy(float)
-        order = np.argsort(am_score, kind="mergesort")
-        n_tail = min(int(np.floor(len(order) * extreme_fraction)), len(order) // 2)
-        if n_tail < min_extreme_cells:
-            continue
-        values = am_score[order]
-        if (
-            values[n_tail - 1] == values[n_tail]
-            or values[-n_tail] == values[-n_tail - 1]
-        ):
-            continue
-        low, high = order[:n_tail], order[-n_tail:]
+        if explicit_quantiles:
+            low_cut, high_cut = np.quantile(
+                am_score, [lower_quantile, upper_quantile]
+            )
+            low_candidates = np.flatnonzero(am_score <= low_cut)
+            high_candidates = np.flatnonzero(am_score >= high_cut)
+            low_order = low_candidates[
+                np.argsort(am_score[low_candidates], kind="mergesort")
+            ]
+            high_order = high_candidates[
+                np.argsort(-am_score[high_candidates], kind="mergesort")
+            ]
+            n_tail = min(len(low_order), len(high_order))
+            if n_tail < min_extreme_cells:
+                continue
+            if (
+                (n_tail < len(low_order) and am_score[low_order[n_tail - 1]]
+                 == am_score[low_order[n_tail]])
+                or (n_tail < len(high_order) and am_score[high_order[n_tail - 1]]
+                    == am_score[high_order[n_tail]])
+            ):
+                continue
+            low, high = low_order[:n_tail], high_order[:n_tail]
+            if np.intersect1d(low, high).size:
+                continue
+        else:
+            order = np.argsort(am_score, kind="mergesort")
+            n_tail = min(
+                int(np.floor(len(order) * extreme_fraction)), len(order) // 2
+            )
+            if n_tail < min_extreme_cells:
+                continue
+            values = am_score[order]
+            if (
+                values[n_tail - 1] == values[n_tail]
+                or values[-n_tail] == values[-n_tail - 1]
+            ):
+                continue
+            low, high = order[:n_tail], order[-n_tail:]
         selected = np.concatenate([low, high])
         group = np.concatenate([np.zeros(n_tail, int), np.ones(n_tail, int)])
         am_xy = am[[x_col, y_col]].to_numpy(float)[selected]
@@ -13695,6 +13788,27 @@ def calculate_stage3_knn_continuum_by_core(
     ``neighbor_pool='all'`` defines k among all retained AM/AT2 cells, matching
     a conventional tissue-neighborhood analysis. ``'at2_only'`` instead uses
     each AM's k nearest AT2 cells and answers a different question.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object containing Stage 3 metadata in ``obs``.
+    k_values
+        Numbers of neighbors to query at each scale.
+    neighbor_pool
+        ``"all"`` for tissue kNN or ``"at2_only"`` for nearest-AT2 kNN.
+    min_at2_neighbors, min_am
+        Minimum local AT2 count and analyzed AM count required per core.
+    n_permutations, random_state
+        Within-core AT2-score permutation count and master seed.
+    coordinate_scale_to_um
+        Positive coordinate-to-micrometre multiplier.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Core-level Spearman effects, coverage, neighbor counts, and diagnostic
+        permutation statistics. Positive effects indicate concordant states.
     """
     if neighbor_pool not in {"all", "at2_only"}:
         raise ValueError("neighbor_pool must be 'all' or 'at2_only'.")
@@ -13804,7 +13918,27 @@ def calculate_stage3_radius_continuum_by_core(
     vim_score_col="AT2_VIM_score",
     coordinate_scale_to_um=1.0,
 ):
-    """Correlate AM MHCII score with mean AT2 VIM within each radius."""
+    """Correlate AM MHCII score with mean AT2 VIM within each radius.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object containing Stage 3 metadata in ``obs``.
+    radii
+        Physical radii in micrometres after coordinate conversion.
+    min_at2_neighbors, min_am
+        Minimum local AT2 coverage and analyzed AM count required per core.
+    n_permutations, random_state
+        Within-core AT2-score permutation count and master seed.
+    coordinate_scale_to_um
+        Positive coordinate-to-micrometre multiplier.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Core-level Spearman effects, coverage fractions, neighbor diagnostics,
+        and diagnostic permutation statistics.
+    """
     radii = tuple(sorted({float(radius) for radius in radii if float(radius) > 0}))
     obs = _stage3_common_kwargs(
         adata, core_col, donor_col, tissue_col, tissue, celltype_col,
@@ -13880,7 +14014,27 @@ def calculate_stage3_nearest_at2_by_core(
     vim_score_col="AT2_VIM_score",
     coordinate_scale_to_um=1.0,
 ):
-    """Correlate each AM MHCII score with its nearest AT2 cell's VIM score."""
+    """Correlate each AM MHCII score with its nearest AT2 cell's VIM score.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object containing Stage 3 metadata in ``obs``.
+    max_distance
+        Optional maximum nearest-AT2 distance in micrometres.
+    min_am
+        Minimum eligible AMs required to calculate a correlation.
+    n_permutations, random_state
+        Within-core AT2-score permutation count and master seed.
+    coordinate_scale_to_um
+        Positive coordinate-to-micrometre multiplier.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Core-level nearest-AT2 Spearman effects, distance/coverage diagnostics,
+        and diagnostic permutation statistics.
+    """
     obs = _stage3_common_kwargs(
         adata, core_col, donor_col, tissue_col, tissue, celltype_col,
         am_labels, at2_labels, x_col, y_col, mhcii_score_col, vim_score_col,
@@ -13942,6 +14096,18 @@ def run_stage3_all_methods(adata, **common_kwargs):
     Method-specific arguments should be supplied in the matching nested dict:
     ``balanced_kwargs``, ``knn_kwargs``, ``radius_kwargs``, or
     ``nearest_kwargs``. Remaining arguments are passed to all four functions.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object containing the Stage 3 observation metadata.
+    **common_kwargs
+        Shared arguments plus optional method-specific nested dictionaries.
+
+    Returns
+    -------
+    dict[str, pandas.DataFrame]
+        Core-result tables keyed by the four continuous analysis names.
     """
     common_kwargs = dict(common_kwargs)
     balanced_kwargs = common_kwargs.pop("balanced_kwargs", {})
@@ -13980,7 +14146,25 @@ def run_stage3_multicore(
 
     Only ``adata.obs`` is sent to workers because the Stage 3 calculations do
     not use the expression matrix. This substantially reduces worker memory.
-    A reproducible, distinct random seed is assigned to every core.
+    A reproducible seed is derived from function and core identity.
+
+    Parameters
+    ----------
+    analysis_function
+        One Stage 3 core-level calculation function.
+    adata
+        AnnData-like object containing the required observation metadata.
+    n_jobs
+        Number of joblib processes; use one for deterministic local checks.
+    random_state, verbose
+        Master seed and joblib verbosity.
+    **analysis_kwargs
+        Arguments forwarded to ``analysis_function``.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Concatenated, deterministically sorted core-level results.
     """
     from joblib import Parallel, delayed
 
@@ -14257,6 +14441,27 @@ def calculate_stage3_categorical_pair_enrichment_by_core(
     are retained as wide columns for heatmap plotting. Because edge counts are
     not independent cell replicates, interpret this diagnostic alongside the
     per-AM local-fraction analyses and donor-level inference.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object with categorical AM MHCII and AT2 VIM states.
+    radii
+        AM-to-AT2 edge radii in micrometres after coordinate conversion.
+    min_am_per_group, min_at2_per_group
+        Minimum categorized cells required in each state within a core.
+    odds_correction
+        Continuity correction added to each cell of the 2-by-2 edge table.
+    n_permutations, random_state
+        Within-core AT2-state permutation count and master seed.
+    coordinate_scale_to_um
+        Positive coordinate-to-micrometre multiplier.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Core-level concordance log odds ratios, pair diagnostics, exclusions,
+        and diagnostic permutation statistics.
     """
     radii = tuple(sorted({float(value) for value in radii if float(value) > 0}))
     obs = _stage3_categorical_common_kwargs(
@@ -14468,7 +14673,27 @@ def calculate_stage3_categorical_knn_by_core(
     vim_lo_label="AT2_VIMlo",
     coordinate_scale_to_um=1.0,
 ):
-    """Compare local VIMhi fractions between categorical MHCII AM states."""
+    """Compare local VIMhi fractions between categorical MHCII AM states.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object with categorical AM and AT2 states.
+    k_values, neighbor_pool
+        kNN scales and either all-cell or AT2-only neighbor definition.
+    min_at2_neighbors, min_am_per_group
+        Minimum coverage and MHCII-state counts per core.
+    balance_am_groups, n_balance_repeats
+        Whether and how often to subsample equal MHCIIhi/MHCIIlo groups.
+    n_permutations, random_state
+        Within-core AT2-state permutation count and seed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Difference in local VIMhi fraction (MHCIIhi minus MHCIIlo), retention
+        QC, neighbor diagnostics, and permutation statistics by core and k.
+    """
     if neighbor_pool not in {"all", "at2_only"}:
         raise ValueError("neighbor_pool must be 'all' or 'at2_only'.")
     k_values = tuple(sorted({int(value) for value in k_values if int(value) > 0}))
@@ -14565,7 +14790,27 @@ def calculate_stage3_categorical_radius_by_core(
     vim_lo_label="AT2_VIMlo",
     coordinate_scale_to_um=1.0,
 ):
-    """Compare VIMhi fractions within fixed radii around MHCIIhi/lo AMs."""
+    """Compare VIMhi fractions within fixed radii around MHCIIhi/lo AMs.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object with categorical AM and AT2 states.
+    radii
+        Physical radii in micrometres after coordinate conversion.
+    min_at2_neighbors, min_am_per_group
+        Minimum neighborhood coverage and analyzed AMs in each MHCII state.
+    balance_am_groups, n_balance_repeats
+        Whether and how often to balance the two AM-state groups.
+    n_permutations, random_state
+        Within-core AT2-state permutation count and seed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        MHCIIhi-minus-MHCIIlo local VIMhi-fraction effects, retention QC, and
+        diagnostic permutation statistics by core and radius.
+    """
     radii = tuple(sorted({float(value) for value in radii if float(value) > 0}))
 
     def build(core, am, at2, scales, x_name, y_name):
@@ -14632,7 +14877,27 @@ def calculate_stage3_categorical_nearest_at2_by_core(
     vim_lo_label="AT2_VIMlo",
     coordinate_scale_to_um=1.0,
 ):
-    """Test whether nearest-AT2 VIM state depends on categorical AM state."""
+    """Test whether nearest-AT2 VIM state depends on categorical AM state.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object with categorical AM and AT2 states.
+    max_distance
+        Optional nearest-AT2 eligibility cutoff in micrometres.
+    min_am_per_group
+        Minimum eligible MHCIIhi and MHCIIlo AMs required in a core.
+    odds_correction
+        Continuity correction for the nearest-state 2-by-2 table.
+    n_permutations, random_state
+        Within-core AT2-state permutation count and seed.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Core-level nearest-state log odds ratios, explicit retention QC,
+        distance diagnostics, and permutation statistics.
+    """
     obs = _stage3_categorical_common_kwargs(
         adata, core_col, donor_col, tissue_col, tissue, celltype_col,
         am_labels, at2_labels, x_col, y_col, mhcii_group_col,
@@ -14722,6 +14987,24 @@ def summarize_stage3_by_donor_and_tissue(
     The default two-sided test is appropriate because the VIM-specific spatial
     direction was not tested in the source paper; use alternative="less" only
     for a prospectively specified negative-coupling hypothesis.
+
+    Parameters
+    ----------
+    stage3_results
+        Tidy continuous or categorical core-result table.
+    donor_col, tissue_col, core_col
+        Columns defining independent donors, tissue strata, and spatial cores.
+    min_donors
+        Minimum donors required for a tissue-level signed-rank test.
+    alternative
+        ``"two-sided"`` by default, or a prespecified ``"less"`` or
+        ``"greater"`` alternative.
+
+    Returns
+    -------
+    tuple[pandas.DataFrame, pandas.DataFrame]
+        Equal-core donor summaries and tissue-level donor tests with
+        family-scoped Benjamini-Hochberg FDR.
     """
     from scipy.stats import t as student_t
     from scipy.stats import wilcoxon
@@ -14868,6 +15151,22 @@ def plot_stage3_primary(
     Points are biological donors, diamonds are donor medians, and horizontal
     intervals are donor IQRs. Tissue-level q/p values are displayed on the
     right of each row. The balanced-extremes panel is marked as secondary.
+
+    Parameters
+    ----------
+    donor_summary, tissue_tests
+        Outputs from :func:`summarize_stage3_by_donor_and_tissue`.
+    tissue_order, tissue_colors
+        Display order and macaron color mapping for tissue strata.
+    method_config, primary_scales
+        Optional panel definitions and selected analysis scales.
+    save, dpi
+        Optional output path and raster resolution for embedded points.
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, numpy.ndarray, pandas.DataFrame]
+        Figure, axes array, and donor rows represented in the panels.
     """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
@@ -15121,7 +15420,24 @@ def plot_stage3_scale_sensitivity(
     save=None,
     dpi=300,
 ):
-    """Stage 2-style median/IQR sensitivity plot across Stage 3 scales."""
+    """Stage 2-style median/IQR sensitivity plot across Stage 3 scales.
+
+    Parameters
+    ----------
+    donor_summary
+        Unique donor-level Stage 3 effect rows.
+    tissue_tests
+        Optional tissue-test table retained for API symmetry.
+    tissue_order, tissue_colors, methods
+        Tissue display settings and scale-dependent methods to include.
+    save, dpi
+        Optional output path and figure resolution.
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, numpy.ndarray, pandas.DataFrame]
+        Figure, axes, and the median/IQR summary used for plotting.
+    """
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
 
@@ -15270,7 +15586,25 @@ def plot_stage3_categorical_primary(
     save=None,
     dpi=300,
 ):
-    """Stage 2-style 2×2 forest plot for categorical Stage 3 results."""
+    """Stage 2-style 2×2 forest plot for categorical Stage 3 results.
+
+    Parameters
+    ----------
+    donor_summary, tissue_tests
+        Donor and tissue outputs for categorical Stage 3 methods.
+    primary_scales
+        Mapping from categorical method name to its displayed scale.
+    tissue_order, tissue_colors
+        Tissue display order and colors.
+    save, dpi
+        Optional output path and figure resolution.
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, numpy.ndarray, pandas.DataFrame]
+        Figure, axes, and plotted donor rows returned by
+        :func:`plot_stage3_primary`.
+    """
     if primary_scales is None:
         primary_scales = {
             "categorical_pair_enrichment": 50,
@@ -15353,7 +15687,23 @@ def plot_stage3_categorical_scale_sensitivity(
     save=None,
     dpi=300,
 ):
-    """Median/IQR sensitivity plot for categorical pair, kNN and radius tests."""
+    """Median/IQR sensitivity plot for categorical Stage 3 methods.
+
+    Parameters
+    ----------
+    donor_summary
+        Unique donor-level categorical Stage 3 effects.
+    tissue_order, tissue_colors
+        Tissue display order and colors.
+    save, dpi
+        Optional output path and figure resolution.
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, numpy.ndarray, pandas.DataFrame]
+        Figure, axes, and scale summary returned by
+        :func:`plot_stage3_scale_sensitivity`.
+    """
     return plot_stage3_scale_sensitivity(
         donor_summary=donor_summary,
         tissue_order=tissue_order,
@@ -15393,6 +15743,24 @@ def plot_stage3_categorical_pair_heatmap(
 
     ``value='log2_oe'`` displays log2 observed/expected pair counts;
     ``value='z'`` displays permutation z-scores.
+
+    Parameters
+    ----------
+    pair_results
+        Core-level categorical pair-enrichment results containing donor IDs.
+    scale
+        Radius in micrometres to display.
+    tissue_order
+        Ordered tissue panels.
+    value
+        ``"log2_oe"`` or ``"z"`` pair statistic.
+    save, dpi
+        Optional output path and figure resolution.
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, numpy.ndarray, pandas.DataFrame]
+        Figure, axes, and donor-median tissue summary.
     """
     import matplotlib.pyplot as plt
     from matplotlib.colors import LinearSegmentedColormap, TwoSlopeNorm
@@ -15603,6 +15971,29 @@ def plot_mhcii_hi_proportion_by_age(
     The numerator is MHCIIhi AMs. The denominator is every AM, including
     MHCIIlo, ambiguous and unassigned AMs. Individual cores are shown as
     faded points; solid points are donor-aggregated proportions.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object with donor, core, age, cell type, and MHCII group.
+    group_col, hi_label
+        Categorical state column and label counted in the numerator.
+    donor_col, core_col, age_col
+        Donor, spatial-core, and continuous-age columns.
+    tissue, tissue_col
+        Optional tissue filter and its metadata column.
+    am_labels
+        Labels included in the all-AM denominator.
+    min_am_per_core, min_am_per_donor
+        Descriptive-core and donor-model inclusion thresholds.
+    output_file, dpi
+        Optional figure path and resolution.
+
+    Returns
+    -------
+    dict
+        Figure objects, core/donor summaries, fitted prediction, model table,
+        and the saved output path when supplied.
     """
     required = [
         group_col,

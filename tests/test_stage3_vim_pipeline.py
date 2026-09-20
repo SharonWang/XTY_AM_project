@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import inspect
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -9,6 +11,29 @@ import pandas as pd
 import pytest
 
 from scripts import xty_am_pipeline as pipeline
+
+
+PUBLIC_STAGE3 = (
+    "plot_anndata_group_umap",
+    "score_and_assign_two_signatures",
+    "calculate_stage3_balanced_extremes_by_core",
+    "calculate_stage3_knn_continuum_by_core",
+    "calculate_stage3_radius_continuum_by_core",
+    "calculate_stage3_nearest_at2_by_core",
+    "run_stage3_all_methods",
+    "run_stage3_multicore",
+    "summarize_stage3_by_donor_and_tissue",
+    "plot_stage3_primary",
+    "plot_stage3_scale_sensitivity",
+    "calculate_stage3_categorical_pair_enrichment_by_core",
+    "calculate_stage3_categorical_knn_by_core",
+    "calculate_stage3_categorical_radius_by_core",
+    "calculate_stage3_categorical_nearest_at2_by_core",
+    "plot_stage3_categorical_primary",
+    "plot_stage3_categorical_scale_sensitivity",
+    "plot_stage3_categorical_pair_heatmap",
+    "plot_mhcii_hi_proportion_by_age",
+)
 
 
 def _one_core(donor: str, core: str, *, negative_coupling: bool = True) -> pd.DataFrame:
@@ -217,6 +242,22 @@ def test_stage3_balanced_extremes_do_not_split_tied_boundaries():
     assert result.empty
 
 
+def test_stage3_balanced_extremes_honors_legacy_explicit_quantiles():
+    """Explicit legacy quantiles must not be accepted and then ignored."""
+    result = pipeline.calculate_stage3_balanced_extremes_by_core(
+        make_stage3_adata(negative_coupling=False),
+        radii=(3,),
+        extreme_fraction=0.5,
+        lower_quantile=0.25,
+        upper_quantile=0.75,
+        min_at2_neighbors=1,
+        min_extreme_cells=1,
+        n_permutations=19,
+    )
+    assert result.iloc[0]["n_am_low"] == 1
+    assert result.iloc[0]["n_am_high"] == 1
+
+
 def test_stage3_negative_coupling_has_negative_effect():
     """Higher MHCII paired with lower VIM must retain a negative sign."""
     result = pipeline.calculate_stage3_nearest_at2_by_core(
@@ -339,3 +380,14 @@ def test_stage3_plots_save_outputs(tmp_path):
     )
     pipeline.plot_stage3_categorical_pair_heatmap(pair_results, save=heatmap)
     assert primary.exists() and sensitivity.exists() and heatmap.exists()
+
+
+def test_stage3_public_api_is_exported_documented_and_has_docstrings():
+    """Every Stage 3 public function must be exported and user-documented."""
+    readme = Path("README.md").read_text(encoding="utf-8")
+    for name in PUBLIC_STAGE3:
+        assert name in pipeline.__all__
+        docstring = inspect.getdoc(getattr(pipeline, name))
+        assert docstring is not None and "Parameters" in docstring
+        assert "Returns" in docstring
+        assert f"`{name}`" in readme

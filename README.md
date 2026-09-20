@@ -118,6 +118,45 @@ returns, errors, and relevant scientific interpretation.
 | `calculate_knn_niche_continuum` | Quantifies each AM's k-nearest-neighbor composition within core, calculates within-core score correlations, combines core correlations within donor using Fisher z, and tests donor correlations by tissue. |
 | `calculate_radius_niche_continuum` | Quantifies fixed-radius neighbor count, fraction, density, or presence around each AM within core and performs core-, donor-, and tissue-level correlation summaries. |
 
+### Stage 3 AM MHCII–AT2 VIM-state analysis
+
+Stage 3 asks whether continuous or categorical AM MHCII state is spatially
+coupled to AT2 VIM state. Continuous analyses are primary; categorical states
+and balanced tails are sensitivity analyses. Effects retain their natural
+sign: a negative effect means higher-MHCII AMs are near lower-VIM AT2 states,
+consistent with the working hypothesis that adapted MHCII-high AMs associate
+with canonical/VIM-low rather than transitional/VIM-high AT2. The Xu paper did
+not directly test this VIM-specific distance hypothesis, so tissue tests are
+two-sided by default. Core permutation P values are diagnostic; final
+inference uses one equal-core summary per donor.
+
+| Function | Role and output |
+|---|---|
+| `plot_anndata_group_umap` | Reusable single-panel, split, or highlighted categorical UMAP with explicit palettes and vector labels. |
+| `score_and_assign_two_signatures` | Scores two gene sets and assigns the larger score, with optional low-score or small-margin ambiguity. Independently controlled Scanpy scores are heuristic and require marker/distribution review. |
+| `calculate_stage3_balanced_extremes_by_core` | Secondary tie-safe comparison of local AT2 VIM score around equal MHCII-score tails at fixed radii. |
+| `calculate_stage3_knn_continuum_by_core` | Primary within-core continuous MHCII–VIM kNN coupling; focal AM self-neighbors are excluded. |
+| `calculate_stage3_radius_continuum_by_core` | Primary continuous MHCII–VIM coupling inside physical radii, with coverage diagnostics. |
+| `calculate_stage3_nearest_at2_by_core` | Primary continuous MHCII coupling to the VIM score of the nearest eligible AT2. |
+| `run_stage3_all_methods` | Runs the four continuous methods and returns tidy core tables. |
+| `run_stage3_multicore` | Runs one Stage 3 method by donor × tissue × core with stable identity-derived seeds. |
+| `summarize_stage3_by_donor_and_tissue` | Equal-core donor aggregation, donor signed-rank tests, and method/effect/scale-scoped FDR across tissues. |
+| `plot_stage3_primary` | Donor forest plot at prespecified scales with medians, IQRs, and tissue-test annotations. |
+| `plot_stage3_scale_sensitivity` | Descriptive donor median/IQR trajectories across k or radius values. |
+| `calculate_stage3_categorical_pair_enrichment_by_core` | Four-state edge-count concordance log odds ratio; interpret with per-AM analyses. |
+| `calculate_stage3_categorical_knn_by_core` | Balanced MHCIIhi-minus-MHCIIlo local VIMhi-fraction difference across kNN scales. |
+| `calculate_stage3_categorical_radius_by_core` | Balanced categorical local-VIMhi difference across physical radii. |
+| `calculate_stage3_categorical_nearest_at2_by_core` | Nearest-AT2 VIM-state odds ratio by AM MHCII group, requiring both AM states. |
+| `plot_stage3_categorical_primary` | Primary-scale donor forest wrapper for categorical sensitivity methods. |
+| `plot_stage3_categorical_scale_sensitivity` | Median/IQR scale sensitivity for categorical pair, kNN, and radius effects. |
+| `plot_stage3_categorical_pair_heatmap` | Tissue panels of donor-median pair log2 observed/expected values or z-scores. |
+| `plot_mhcii_hi_proportion_by_age` | Exploratory donor grouped-quasibinomial age trend; all AMs form the denominator. |
+
+`plot_mhcii_at2_spatial_core` also supports `at2_display="group"` with
+`AT2_VIM_group`; its historical default still draws all AT2 as one class. All
+Stage 3 spatial functions group by donor, tissue, and core, convert declared
+coordinates to micrometres once, and never construct cross-core neighborhoods.
+
 ### Spatial ligand–receptor and CellChat preparation
 
 Communication analysis has two deliberately separate tracks. The export

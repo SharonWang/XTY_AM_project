@@ -80,6 +80,16 @@ def test_spatial_core_plot_default_remains_all_at2(tmp_path):
     assert output.exists()
 
 
+def test_spatial_core_plot_rejects_invalid_coordinate_shape(tmp_path):
+    """The extended plot must preserve the prior x/y shape validation."""
+    adata = make_spatial_plot_adata()
+    adata.obsm["spatial"] = np.zeros((adata.n_obs, 1), dtype=float)
+    with pytest.raises(ValueError, match="x/y"):
+        pipeline.plot_mhcii_at2_spatial_core(
+            adata, "C1", output_dir=tmp_path, show=False
+        )
+
+
 def test_mhcii_hi_age_plot_uses_all_am_in_denominator(tmp_path):
     """MHCIIlo and unassigned states must remain in the AM denominator."""
     result = pipeline.plot_mhcii_hi_proportion_by_age(
