@@ -7,17 +7,19 @@ treated as a broad candidate pool, not an automatic alveolar-macrophage call.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 import gzip
 import hashlib
 import json
+from numbers import Integral
 from pathlib import Path
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 import warnings
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.axes import Axes
 from matplotlib.colors import (
     BoundaryNorm,
     LinearSegmentedColormap,
@@ -37,6 +39,9 @@ from scipy.io import mmwrite
 from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
 from scipy.stats import false_discovery_control, spearmanr, wilcoxon
+
+if TYPE_CHECKING:
+    from anndata import AnnData
 
 try:
     import squidpy as sq
@@ -12341,6 +12346,857 @@ def test_lr_across_donors(donor_summary, min_donors=5):
     return tests
 
 
+def plot_anndata_group_umap(
+    adata: "AnnData",
+    group_col: str,
+    split_by: str | None = None,
+    split_categories: Iterable[Any] | None = None,
+    palette: dict[Any, Any] | None = None,
+    point_size: float = 18,
+    point_alpha: float = 0.5,
+    na_color: Any = "#D3D3D3",
+    umap_key: str = "X_umap",
+    top_group: Any | None = None,
+    width_cm: float = 4,
+    height_cm: float = 4,
+    left_cm: float = 1.20,
+    right_cm: float = 0.25,
+    bottom_cm: float = 1.05,
+    top_cm: float = 0.45,
+    panel_gap_cm: float = 0.50,
+    show_legend: bool = True,
+    legend_title: str | None = None,
+    legend_marker_size: float = 6,
+    legend_fontsize: float = 8,
+    legend_title_size: float = 9,
+    legend_gap_cm: float = 0.35,
+    legend_width_cm: float = 3.5,
+    legend_ncol: int = 2,
+    legend_columnspacing: float = 1.2,
+    legend_handletextpad: float = 0.5,
+    title: str | None = None,
+    xlabel: str = "UMAP1",
+    ylabel: str = "UMAP2",
+    axis_label_size: float = 10,
+    title_size: float = 11,
+    split_title_size: float = 10,
+    tick_label_size: float = 8,
+    spine_width: float = 1.0,
+    tick_width: float = 1.0,
+    tick_length: float = 3,
+    tick_nbins: int = 4,
+    padding_fraction: float = 0.03,
+    shared_limits: bool = True,
+    rasterized: bool = False,
+    transparent: bool = True,
+    save: str | Path | None = None,
+    dpi: float = 600,
+) -> tuple[Figure, np.ndarray]:
+    """Plot categorical AnnData annotations on one or more UMAP panels.
+
+    With no split, one UMAP is coloured by ``group_col``. Splitting by another
+    annotation creates one cell-subset panel per split category. Splitting by
+    ``group_col`` instead creates highlight panels: every panel contains all
+    cells, but only its selected category is coloured and drawn on top. Each
+    panel uses one scatter call, allowing points to be rasterized together while
+    axes, labels, titles, ticks, and the legend remain vector objects.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object whose ``obs`` table contains ``group_col`` and whose
+        ``obsm`` mapping contains two-dimensional UMAP coordinates.
+    group_col : str
+        Name of the categorical column in ``adata.obs`` used to colour cells.
+        Non-categorical values are converted to a pandas categorical series.
+    split_by : str, optional
+        Annotation column used to create multiple panels. If different from
+        ``group_col``, each panel contains only cells from one split category.
+        If equal to ``group_col``, each panel contains all cells and highlights
+        one group. If omitted, a single unsplit panel is drawn.
+    split_categories : iterable, optional
+        Ordered subset of observed ``split_by`` categories to plot. By default,
+        every observed category is used in categorical order. Ignored when
+        ``split_by`` is omitted.
+    palette : dict, optional
+        Mapping from every observed non-missing group to a Matplotlib-compatible
+        colour. If omitted, colours are read from
+        ``adata.uns[f"{group_col}_colors"]`` when available; otherwise the
+        Matplotlib ``tab20`` colour map is used. A supplied mapping is not
+        modified or stored in ``adata``.
+    point_size : float, default=18
+        Marker area passed to ``Axes.scatter`` in points squared.
+    point_alpha : float, default=0.5
+        Opacity of plotted cell markers.
+    na_color : color, default="#D3D3D3"
+        Matplotlib-compatible colour used for cells with missing group values.
+    umap_key : str, default="X_umap"
+        Key in ``adata.obsm`` containing at least two UMAP coordinate columns.
+    top_group : optional
+        Category to draw after all other groups so its cells appear visually on
+        top. The value must exactly match one of the observed, non-missing
+        categories in ``group_col``. This affects unsplit and normal split
+        panels; highlight panels always draw their selected group last.
+    width_cm : float, default=4
+        Physical width of each UMAP plotting box in centimetres.
+    height_cm : float, default=4
+        Physical height of each UMAP plotting box in centimetres.
+    left_cm : float, default=1.20
+        Space to the left of the first plotting box in centimetres.
+    right_cm : float, default=0.25
+        Space after the last plotting box in centimetres.
+    bottom_cm : float, default=1.05
+        Space below the plotting box in centimetres.
+    top_cm : float, default=0.45
+        Space above the plotting box in centimetres.
+    panel_gap_cm : float, default=0.50
+        Horizontal gap between adjacent UMAP panels in centimetres.
+    show_legend : bool, default=True
+        Whether to create a figure-level legend for groups and missing values.
+    legend_title : str, optional
+        Legend heading. Defaults to ``group_col`` when the legend is displayed.
+    legend_marker_size : float, default=6
+        Diameter of legend markers in points.
+    legend_fontsize : float, default=8
+        Font size of legend labels in points.
+    legend_title_size : float, default=9
+        Font size of the legend title in points.
+    legend_gap_cm : float, default=0.35
+        Horizontal gap before the legend area in centimetres.
+    legend_width_cm : float, default=3.5
+        Width reserved for the legend in centimetres.
+    legend_ncol : int, default=2
+        Number of columns used to arrange legend entries.
+    legend_columnspacing : float, default=1.2
+        Horizontal spacing between legend columns in font-size units.
+    legend_handletextpad : float, default=0.5
+        Gap between each legend marker and its label in font-size units.
+    title : str, optional
+        Overall plot title, horizontally centred over the combined panel area
+        and vertically centred within the reserved top margin. No title is
+        drawn when omitted.
+    xlabel : str, default="UMAP1"
+        Label displayed on the horizontal axis.
+    ylabel : str, default="UMAP2"
+        Label displayed on the vertical axis.
+    axis_label_size : float, default=10
+        Font size of both axis labels in points.
+    title_size : float, default=11
+        Font size of the overall figure title in points.
+    split_title_size : float, default=10
+        Font size of category titles shown above split panels.
+    tick_label_size : float, default=8
+        Font size of axis tick labels in points.
+    spine_width : float, default=1.0
+        Line width of the visible left and bottom axes spines.
+    tick_width : float, default=1.0
+        Line width of major tick marks.
+    tick_length : float, default=3
+        Length of major tick marks in points.
+    tick_nbins : int, default=4
+        Maximum approximate number of integer major tick intervals per axis.
+    padding_fraction : float, default=0.03
+        Fraction of each coordinate range added to both sides of its axis. A
+        fixed padding of one is used when a coordinate range is zero.
+    shared_limits : bool, default=True
+        Whether every split panel uses limits calculated from all cells. When
+        ``False``, each panel derives limits from the cells it displays.
+    rasterized : bool, default=False
+        Whether to rasterize each panel's scatter collection in vector output.
+    transparent : bool, default=True
+        Whether saved figures use a transparent background.
+    save : str or pathlib.Path, optional
+        Output filename passed to ``Figure.savefig``. The figure is not written
+        when omitted.
+    dpi : float, default=600
+        Resolution passed to ``Figure.savefig`` when ``save`` is provided.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Newly created figure, sized from the requested centimetre dimensions.
+    axes : numpy.ndarray
+        One-dimensional object array containing the UMAP axes in split-category
+        order. An unsplit plot returns an array containing one Axes object.
+
+    Raises
+    ------
+    KeyError
+        If ``group_col`` or ``split_by`` is absent from ``adata.obs``,
+        ``umap_key`` is absent from ``adata.obsm``, or a supplied palette lacks
+        an observed group.
+    ValueError
+        If the UMAP array is not two-dimensional with at least two columns, its
+        row count differs from ``adata.n_obs``, no non-missing groups exist, or
+        stored AnnData colours do not match all categorical levels. Also raised
+        when ``top_group`` is not an observed group, a requested split category
+        is unavailable, or no split panels can be created.
+
+    Examples
+    --------
+    >>> fig, axes = plot_anndata_group_umap(
+    ...     adata,
+    ...     group_col="cell_type",
+    ...     split_by="sample",
+    ...     rasterized=True,
+    ...     save="cell_type_umap.pdf",
+    ... )
+
+    Notes
+    -----
+    In split mode only the far-left panel retains its y-axis. Category and split
+    order follow pandas categorical order. ``top_group`` changes drawing order
+    without changing the legend order.
+    """
+    # -------------------------------------------------------------------------
+    # Validate the AnnData inputs and UMAP coordinates.
+    # -------------------------------------------------------------------------
+    if group_col not in adata.obs.columns:
+        raise KeyError(f"'{group_col}' was not found in adata.obs.")
+
+    if split_by is not None and split_by not in adata.obs.columns:
+        raise KeyError(f"'{split_by}' was not found in adata.obs.")
+
+    if umap_key not in adata.obsm:
+        raise KeyError(f"'{umap_key}' was not found in adata.obsm.")
+
+    umap_xy = np.asarray(adata.obsm[umap_key])
+
+    if umap_xy.ndim != 2 or umap_xy.shape[1] < 2:
+        raise ValueError(
+            f"adata.obsm['{umap_key}'] must contain at least two columns."
+        )
+
+    if umap_xy.shape[0] != adata.n_obs:
+        raise ValueError(
+            f"adata.obsm['{umap_key}'] has {umap_xy.shape[0]} rows, "
+            f"but adata has {adata.n_obs} cells."
+        )
+
+    # -------------------------------------------------------------------------
+    # Normalize group information and omit unused categorical levels.
+    # -------------------------------------------------------------------------
+    group_values = adata.obs[group_col].copy()
+
+    if not isinstance(group_values.dtype, pd.CategoricalDtype):
+        group_values = group_values.astype("category")
+
+    all_categories = list(group_values.cat.categories)
+    groups = [group for group in all_categories if (group_values == group).any()]
+
+    if not groups:
+        raise ValueError(f"No non-missing groups found in '{group_col}'.")
+
+    if top_group is not None and top_group not in groups:
+        raise ValueError(
+            f"top_group={top_group!r} was not found in "
+            f"adata.obs['{group_col}']. Available groups: {groups}"
+        )
+
+    # -------------------------------------------------------------------------
+    # Resolve a complete palette for the groups that are present.
+    # -------------------------------------------------------------------------
+    color_key = f"{group_col}_colors"
+
+    if palette is None:
+        if color_key in adata.uns:
+            stored_colors = list(adata.uns[color_key])
+
+            if len(stored_colors) != len(all_categories):
+                raise ValueError(
+                    f"adata.obs['{group_col}'] has {len(all_categories)} "
+                    f"categories, but adata.uns['{color_key}'] has "
+                    f"{len(stored_colors)} colours."
+                )
+
+            full_palette = dict(zip(all_categories, stored_colors))
+            palette = {group: full_palette[group] for group in groups}
+        else:
+            cmap = plt.get_cmap("tab20")
+            palette = {group: cmap(i % 20) for i, group in enumerate(groups)}
+    else:
+        missing = [group for group in groups if group not in palette]
+        if missing:
+            raise KeyError(
+                "No colour supplied for: " + ", ".join(map(str, missing))
+            )
+
+    # -------------------------------------------------------------------------
+    # Resolve the ordered set of panels.
+    # -------------------------------------------------------------------------
+    if split_by is None:
+        split_levels = [None]
+    else:
+        split_values = adata.obs[split_by].copy()
+        if not isinstance(split_values.dtype, pd.CategoricalDtype):
+            split_values = split_values.astype("category")
+
+        available_split_levels = [
+            level
+            for level in split_values.cat.categories
+            if (split_values == level).any()
+        ]
+
+        if split_categories is None:
+            split_levels = available_split_levels
+        else:
+            requested_split_levels = list(split_categories)
+            missing_split = [
+                level
+                for level in requested_split_levels
+                if level not in available_split_levels
+            ]
+            if missing_split:
+                raise ValueError(
+                    "These split categories were not found: "
+                    + ", ".join(map(str, missing_split))
+                )
+            split_levels = requested_split_levels
+
+    if not split_levels:
+        raise ValueError("No split categories available to plot.")
+
+    # -------------------------------------------------------------------------
+    # Calculate shared limits and exact multi-panel figure dimensions.
+    # -------------------------------------------------------------------------
+    x_all = umap_xy[:, 0]
+    y_all = umap_xy[:, 1]
+    x_range = np.ptp(x_all)
+    y_range = np.ptp(y_all)
+    x_pad = padding_fraction * x_range if x_range > 0 else 1
+    y_pad = padding_fraction * y_range if y_range > 0 else 1
+    global_xlim = (np.nanmin(x_all) - x_pad, np.nanmax(x_all) + x_pad)
+    global_ylim = (np.nanmin(y_all) - y_pad, np.nanmax(y_all) + y_pad)
+
+    n_panels = len(split_levels)
+    plot_area_width_cm = n_panels * width_cm + (n_panels - 1) * panel_gap_cm
+    legend_extra_cm = legend_gap_cm + legend_width_cm if show_legend else 0
+    figure_width_cm = (
+        left_cm + plot_area_width_cm + right_cm + legend_extra_cm
+    )
+    figure_height_cm = bottom_cm + height_cm + top_cm
+    cm_to_inch = 1 / 2.54
+    fig = plt.figure(
+        figsize=(figure_width_cm * cm_to_inch, figure_height_cm * cm_to_inch)
+    )
+
+    axes: list[Axes] = []
+
+    # -------------------------------------------------------------------------
+    # Build and format each UMAP panel.
+    # -------------------------------------------------------------------------
+    for panel_i, split_level in enumerate(split_levels):
+        panel_left_cm = left_cm + panel_i * (width_cm + panel_gap_cm)
+        ax = fig.add_axes(
+            [
+                panel_left_cm / figure_width_cm,
+                bottom_cm / figure_height_cm,
+                width_cm / figure_width_cm,
+                height_cm / figure_height_cm,
+            ]
+        )
+        axes.append(ax)
+
+        # Highlight mode keeps every cell and colours only the selected group.
+        if split_by == group_col:
+            x = x_all
+            y = y_all
+            panel_groups = group_values.copy()
+            colors = np.full(adata.n_obs, na_color, dtype=object)
+            selected_mask = (panel_groups == split_level).to_numpy()
+            colors[selected_mask] = palette[split_level]
+            order_rank = np.zeros(adata.n_obs, dtype=int)
+            order_rank[selected_mask] = 1
+        else:
+            # Normal mode uses every cell when unsplit or a split-level subset.
+            if split_by is None:
+                panel_mask = np.ones(adata.n_obs, dtype=bool)
+            else:
+                panel_mask = (adata.obs[split_by] == split_level).to_numpy()
+
+            panel_idx = np.where(panel_mask)[0]
+            x = x_all[panel_idx]
+            y = y_all[panel_idx]
+            panel_groups = group_values.iloc[panel_idx]
+            colors = np.full(len(panel_idx), na_color, dtype=object)
+            order_rank = np.zeros(len(panel_idx), dtype=int)
+
+            for group_i, group in enumerate(groups, start=1):
+                mask = (panel_groups == group).to_numpy()
+                colors[mask] = palette[group]
+                order_rank[mask] = group_i
+
+            if top_group is not None:
+                top_mask = (panel_groups == top_group).to_numpy()
+                order_rank[top_mask] = len(groups) + 1
+
+        # Stable sorting preserves original cell order within each category.
+        order = np.argsort(order_rank, kind="stable")
+        points = ax.scatter(
+            x[order],
+            y[order],
+            s=point_size,
+            c=colors[order],
+            alpha=point_alpha,
+            linewidths=0,
+            edgecolors="none",
+            rasterized=rasterized,
+            zorder=2,
+        )
+        points.set_gid(
+            "all_umap_dots"
+            if split_by is None
+            else f"umap_dots_{split_level}"
+        )
+
+        if shared_limits:
+            ax.set_xlim(global_xlim)
+            ax.set_ylim(global_ylim)
+        else:
+            local_x_range = np.ptp(x)
+            local_y_range = np.ptp(y)
+            local_x_pad = (
+                padding_fraction * local_x_range if local_x_range > 0 else 1
+            )
+            local_y_pad = (
+                padding_fraction * local_y_range if local_y_range > 0 else 1
+            )
+            ax.set_xlim(np.nanmin(x) - local_x_pad, np.nanmax(x) + local_x_pad)
+            ax.set_ylim(np.nanmin(y) - local_y_pad, np.nanmax(y) + local_y_pad)
+
+        ax.set_box_aspect(height_cm / width_cm)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_linewidth(spine_width)
+        ax.spines["bottom"].set_linewidth(spine_width)
+        ax.tick_params(
+            axis="both",
+            which="major",
+            labelsize=tick_label_size,
+            width=tick_width,
+            length=tick_length,
+            direction="out",
+        )
+        ax.grid(False)
+        ax.set_xlabel(xlabel, fontsize=axis_label_size)
+
+        # Only the far-left split panel retains the y-axis and its label.
+        if panel_i == 0:
+            ax.set_ylabel(ylabel, fontsize=axis_label_size)
+        else:
+            ax.set_ylabel("")
+            ax.spines["left"].set_visible(False)
+            ax.tick_params(axis="y", which="both", left=False, labelleft=False)
+
+        if split_by is not None:
+            ax.set_title(
+                str(split_level),
+                fontsize=split_title_size,
+                fontweight="normal",
+                pad=7,
+            )
+
+    axes_array = np.asarray(axes, dtype=object)
+
+    # Place an overall title above the centre of the combined plotting area.
+    if title is not None:
+        plot_center_cm = left_cm + plot_area_width_cm / 2
+        title_y_cm = bottom_cm + height_cm + top_cm * 0.55
+        fig.text(
+            plot_center_cm / figure_width_cm,
+            title_y_cm / figure_height_cm,
+            title,
+            ha="center",
+            va="center",
+            fontsize=title_size,
+        )
+
+    # Create one vector legend shared by all panels.
+    if show_legend:
+        if legend_title is None:
+            legend_title = group_col
+
+        legend_handles = [
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="",
+                markerfacecolor=palette[group],
+                markeredgecolor="none",
+                alpha=1.0,
+                markersize=legend_marker_size,
+                label=str(group),
+            )
+            for group in groups
+        ]
+
+        if group_values.isna().any():
+            legend_handles.append(
+                Line2D(
+                    [0],
+                    [0],
+                    marker="o",
+                    linestyle="",
+                    markerfacecolor=na_color,
+                    markeredgecolor="none",
+                    alpha=1.0,
+                    markersize=legend_marker_size,
+                    label="NA",
+                )
+            )
+
+        legend_left_cm = (
+            left_cm + plot_area_width_cm + right_cm + legend_gap_cm
+        )
+        fig.legend(
+            handles=legend_handles,
+            title=legend_title,
+            frameon=False,
+            loc="center left",
+            bbox_to_anchor=(legend_left_cm / figure_width_cm, 0.5),
+            bbox_transform=fig.transFigure,
+            borderaxespad=0,
+            fontsize=legend_fontsize,
+            title_fontsize=legend_title_size,
+            ncol=legend_ncol,
+            columnspacing=legend_columnspacing,
+            handletextpad=legend_handletextpad,
+        )
+
+    if save is not None:
+        fig.savefig(save, dpi=dpi, transparent=transparent)
+
+    return fig, axes_array
+
+
+def score_and_assign_two_signatures(
+    adata: "AnnData",
+    gene_list_1: Iterable[str],
+    gene_list_2: Iterable[str],
+    score_name_1: str = "Signature1_score",
+    score_name_2: str = "Signature2_score",
+    output_col: str = "Signature_group",
+    label_1: str = "Signature1",
+    label_2: str = "Signature2",
+    ambiguous_label: str = "Ambiguous",
+    use_raw: bool = True,
+    layer: str | None = None,
+    scale: bool = True,
+    max_value: float | None = 10,
+    zero_center: bool = True,
+    ambiguous: bool = False,
+    ambiguous_threshold: float = 0,
+    min_score_difference: float = 0.0,
+    ctrl_size: int = 50,
+    n_bins: int = 25,
+    random_state: int | None = 0,
+    make_categorical: bool = True,
+    verbose: bool = True,
+) -> "AnnData":
+    """Score two gene signatures and assign each cell to the higher score.
+
+    The function constructs a temporary AnnData object from the selected
+    expression source, optionally scales that matrix, and calculates both
+    scores with :func:`scanpy.tl.score_genes`. The scores and final assignment
+    are then written to the original object's ``obs`` table. Ties are assigned
+    to ``label_1``. When ambiguity handling is enabled, a cell is assigned to
+    ``ambiguous_label`` if both scores are below ``ambiguous_threshold`` or
+    their absolute difference is below ``min_score_difference``.
+
+    Parameters
+    ----------
+    adata : anndata.AnnData
+        AnnData object to annotate. Its observation order is preserved. The
+        selected expression source must contain cells in the same order as
+        ``adata.obs``.
+    gene_list_1 : iterable of str
+        Genes defining the first signature. Duplicate names are removed while
+        preserving their first occurrence. Missing genes are reported and
+        ignored, but at least one requested gene must be available.
+    gene_list_2 : iterable of str
+        Genes defining the second signature. Duplicate names are removed while
+        preserving their first occurrence. Missing genes are reported and
+        ignored, but at least one requested gene must be available.
+    score_name_1 : str, default="Signature1_score"
+        Name of the first score column written to ``adata.obs``.
+    score_name_2 : str, default="Signature2_score"
+        Name of the second score column written to ``adata.obs``.
+    output_col : str, default="Signature_group"
+        Name of the final signature-assignment column written to ``adata.obs``.
+    label_1 : str, default="Signature1"
+        Assignment for cells whose first score is greater than or equal to
+        their second score.
+    label_2 : str, default="Signature2"
+        Assignment for cells whose second score is greater than their first
+        score.
+    ambiguous_label : str, default="Ambiguous"
+        Assignment for cells whose two scores are both below
+        ``ambiguous_threshold`` when ``ambiguous=True``.
+    use_raw : bool, default=True
+        Whether to score expression from ``adata.raw``. This cannot be enabled
+        together with ``layer``.
+    layer : str, optional
+        Name of an AnnData layer to score. When omitted with ``use_raw=False``,
+        expression is obtained from ``adata.X``.
+    scale : bool, default=True
+        Whether to call :func:`scanpy.pp.scale` on the temporary scoring object
+        before calculating the signatures. The original expression matrix is
+        not scaled or otherwise modified.
+    max_value : float, optional, default=10
+        Maximum absolute scaled value passed to :func:`scanpy.pp.scale`. Use
+        ``None`` to disable clipping.
+    zero_center : bool, default=True
+        Whether :func:`scanpy.pp.scale` zero-centres expression values. Centred
+        scaling can convert a sparse matrix to a dense matrix.
+    ambiguous : bool, default=False
+        Whether to assign ``ambiguous_label`` when both scores are below the
+        ambiguity threshold.
+    ambiguous_threshold : float, default=0
+        Strict upper bound used for both scores when identifying ambiguous
+        cells. A cell is ambiguous when both values are below this value.
+    min_score_difference : float, default=0.0
+        Nonnegative minimum absolute separation between the two scores. When
+        ambiguity handling is enabled, cells below this margin are ambiguous.
+    ctrl_size : int, default=50
+        Number of reference genes sampled for each expression bin by
+        :func:`scanpy.tl.score_genes`. Must be a positive integer.
+    n_bins : int, default=25
+        Number of expression-level bins used to select reference genes. Must be
+        an integer of at least two.
+    random_state : int, optional, default=0
+        Random seed passed to :func:`scanpy.tl.score_genes` for reproducible
+        control-gene selection. Use ``None`` to leave it unspecified.
+    make_categorical : bool, default=True
+        Whether to store ``output_col`` as an ordered pandas categorical. The
+        order is ``label_1``, optionally ``ambiguous_label``, then ``label_2``.
+    verbose : bool, default=True
+        Whether to print the expression source, present and missing genes,
+        score summaries, and assignment counts and percentages.
+
+    Returns
+    -------
+    anndata.AnnData
+        The same object supplied through ``adata``, modified in place with
+        ``score_name_1``, ``score_name_2``, and ``output_col`` in ``adata.obs``.
+        Existing columns with those names are replaced.
+
+    Raises
+    ------
+    TypeError
+        If a gene list is not iterable, contains non-string values, or a
+        scoring-size parameter has the wrong type.
+    ValueError
+        If output names or group labels are invalid, the requested expression
+        source is unavailable or conflicting, a gene list is empty or has no
+        genes in the selected source, or a scoring-size parameter is invalid.
+    ImportError
+        If Scanpy or AnnData is not installed in the active environment.
+
+    Examples
+    --------
+    >>> adata = score_and_assign_two_signatures(
+    ...     adata,
+    ...     gene_list_1=["Cd74", "H2-Ab1"],
+    ...     gene_list_2=["S100a8", "S100a9"],
+    ...     label_1="MHCIIhi",
+    ...     label_2="Inflammatory",
+    ...     ambiguous=True,
+    ...     ambiguous_threshold=0,
+    ... )
+    >>> adata.obs[["Signature1_score", "Signature2_score", "Signature_group"]]
+
+    Notes
+    -----
+    Supply an expression representation appropriate for gene-set scoring,
+    commonly normalized and log-transformed values. If raw counts are stored in
+    ``adata.raw``, the default ``use_raw=True`` may not be analytically
+    appropriate. With ``scale=True``, the selected matrix is copied so the
+    original data are protected; ``zero_center=True`` may densify sparse data
+    and substantially increase memory use for large datasets. Comparing two
+    independently controlled Scanpy scores is a heuristic classification, so
+    inspect score distributions and marker expression before interpretation.
+    """
+    # Output columns must be distinct so scores are not silently overwritten.
+    output_names = [score_name_1, score_name_2, output_col]
+    if any(not isinstance(name, str) or not name.strip() for name in output_names):
+        raise ValueError("score and output column names must be non-empty strings")
+    if len(set(output_names)) != len(output_names):
+        raise ValueError("score_name_1, score_name_2, and output_col must be distinct")
+
+    # Ordered categorical labels must be unique and non-empty.
+    labels = [label_1, label_2]
+    if ambiguous:
+        labels.append(ambiguous_label)
+    if any(not isinstance(label, str) or not label.strip() for label in labels):
+        raise ValueError("assignment labels must be non-empty strings")
+    if len(set(labels)) != len(labels):
+        raise ValueError("assignment labels must be distinct")
+
+    if use_raw and layer is not None:
+        raise ValueError("Choose either use_raw=True or layer=..., not both")
+    if layer is not None and (not isinstance(layer, str) or not layer.strip()):
+        raise ValueError("layer must be a non-empty string when provided")
+    if not np.isfinite(min_score_difference) or min_score_difference < 0:
+        raise ValueError("min_score_difference must be finite and nonnegative")
+
+    if isinstance(ctrl_size, bool) or not isinstance(ctrl_size, Integral):
+        raise TypeError("ctrl_size must be an integer")
+    if ctrl_size <= 0:
+        raise ValueError("ctrl_size must be greater than zero")
+    if isinstance(n_bins, bool) or not isinstance(n_bins, Integral):
+        raise TypeError("n_bins must be an integer")
+    if n_bins < 2:
+        raise ValueError("n_bins must be at least two")
+
+    def clean_gene_list(genes: Iterable[str], argument_name: str) -> list[str]:
+        """Validate, de-duplicate, and preserve the order of a gene list."""
+        if isinstance(genes, str):
+            genes = [genes]
+        try:
+            cleaned = list(dict.fromkeys(genes))
+        except TypeError as exc:
+            raise TypeError(f"{argument_name} must be an iterable of strings") from exc
+        if not cleaned:
+            raise ValueError(f"{argument_name} must contain at least one gene")
+        if any(not isinstance(gene, str) or not gene for gene in cleaned):
+            raise TypeError(f"{argument_name} must contain only non-empty strings")
+        return cleaned
+
+    genes_1 = clean_gene_list(gene_list_1, "gene_list_1")
+    genes_2 = clean_gene_list(gene_list_2, "gene_list_2")
+
+    # Import optional single-cell dependencies only when scoring is requested.
+    import anndata
+    import scanpy as sc
+
+    # Work on an independent matrix so optional scaling never changes adata.
+    if use_raw:
+        if adata.raw is None:
+            raise ValueError("use_raw=True, but adata.raw is None")
+        source_matrix = adata.raw.X
+        source_var = adata.raw.var
+        source_name = "adata.raw"
+    elif layer is not None:
+        if layer not in adata.layers:
+            available_layers = list(adata.layers.keys())
+            raise ValueError(
+                f"Layer '{layer}' not found. Available layers: {available_layers}"
+            )
+        source_matrix = adata.layers[layer]
+        source_var = adata.var
+        source_name = f"adata.layers['{layer}']"
+    else:
+        source_matrix = adata.X
+        source_var = adata.var
+        source_name = "adata.X"
+
+    adata_score = anndata.AnnData(
+        X=source_matrix.copy(),
+        obs=adata.obs.copy(),
+        var=source_var.copy(),
+    )
+    adata_score.var_names = adata_score.var_names.astype(str)
+
+    available_genes = set(adata_score.var_names)
+    genes_1_present = [gene for gene in genes_1 if gene in available_genes]
+    genes_2_present = [gene for gene in genes_2 if gene in available_genes]
+    genes_1_missing = [gene for gene in genes_1 if gene not in available_genes]
+    genes_2_missing = [gene for gene in genes_2 if gene not in available_genes]
+
+    if not genes_1_present:
+        raise ValueError("None of the genes in gene_list_1 were found")
+    if not genes_2_present:
+        raise ValueError("None of the genes in gene_list_2 were found")
+
+    if verbose:
+        print(f"Expression source: {source_name}")
+        print(f"\n{score_name_1}: {len(genes_1_present)}/{len(genes_1)} genes found")
+        if genes_1_missing:
+            print("Missing:", genes_1_missing)
+        print(f"\n{score_name_2}: {len(genes_2_present)}/{len(genes_2)} genes found")
+        if genes_2_missing:
+            print("Missing:", genes_2_missing)
+
+    if scale:
+        if verbose:
+            print(
+                f"\nScaling expression (max_value={max_value}, "
+                f"zero_center={zero_center})..."
+            )
+        sc.pp.scale(
+            adata_score,
+            zero_center=zero_center,
+            max_value=max_value,
+        )
+
+    # Calculate each score independently using the same expression background.
+    sc.tl.score_genes(
+        adata_score,
+        gene_list=genes_1_present,
+        score_name=score_name_1,
+        ctrl_size=ctrl_size,
+        n_bins=n_bins,
+        random_state=random_state,
+        use_raw=False,
+    )
+    sc.tl.score_genes(
+        adata_score,
+        gene_list=genes_2_present,
+        score_name=score_name_2,
+        ctrl_size=ctrl_size,
+        n_bins=n_bins,
+        random_state=random_state,
+        use_raw=False,
+    )
+
+    # Reindex defensively before copying scores back to the original object.
+    adata.obs[score_name_1] = adata_score.obs[score_name_1].reindex(
+        adata.obs_names
+    ).to_numpy()
+    adata.obs[score_name_2] = adata_score.obs[score_name_2].reindex(
+        adata.obs_names
+    ).to_numpy()
+
+    score_1 = adata.obs[score_name_1]
+    score_2 = adata.obs[score_name_2]
+    groups = np.where(score_1 >= score_2, label_1, label_2).astype(object)
+
+    if ambiguous:
+        score_difference = (score_1 - score_2).abs()
+        ambiguous_mask = (
+            ((score_1 < ambiguous_threshold) & (score_2 < ambiguous_threshold))
+            | (score_difference < min_score_difference)
+        )
+        groups[ambiguous_mask] = ambiguous_label
+
+    adata.obs[output_col] = groups
+    if make_categorical:
+        category_order = [label_1, label_2]
+        if ambiguous:
+            category_order.insert(1, ambiguous_label)
+        adata.obs[output_col] = pd.Categorical(
+            adata.obs[output_col],
+            categories=category_order,
+            ordered=True,
+        )
+
+    if verbose:
+        print("\nScore summary:")
+        print(adata.obs[[score_name_1, score_name_2]].describe())
+        print(f"\n{output_col}:")
+        counts = adata.obs[output_col].value_counts(sort=False)
+        percentages = adata.obs[output_col].value_counts(
+            normalize=True,
+            sort=False,
+        ) * 100
+        print(pd.DataFrame({"n": counts, "percent": percentages}))
+
+    return adata
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
@@ -12363,7 +13219,8 @@ __all__ = [
     "configure_plot_style", "extract_marker_matrices",
     "gene_detection_by_group", "marker_availability_table",
     "merge_obs_to_main", "plot_am_at2_pct_by_donor",
-    "plot_am_at2_spatial", "plot_focus_umap", "plot_full_umap",
+    "plot_am_at2_spatial", "plot_anndata_group_umap",
+    "plot_focus_umap", "plot_full_umap",
     "plot_knn_niche_continuum",
     "plot_stage1A_niche_dotmap", "plot_stage1B_primary",
     "plot_stage2_primary", "plot_stage2_scale_sensitivity",
@@ -12373,7 +13230,8 @@ __all__ = [
     "plot_program_umap", "plot_radius_core_correlations",
     "plot_spatial_celltypes",
     "plot_spatial_focus", "plot_spatial_programs", "radius_weighted_mean",
-    "save_figure", "export_spatial_cellchat_inputs",
+    "save_figure", "score_and_assign_two_signatures",
+    "export_spatial_cellchat_inputs",
     "select_representative_cores", "select_supportive_cores",
     "summarize_markers", "rank_stage2_core_contributions",
     "summarize_lr_by_donor", "summarise_lr_by_donor",

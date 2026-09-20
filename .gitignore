@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 .mplconfig/
 .tmp/
+.superpowers/sdd/
 
 # Large source and intermediate data
 *.h5ad
