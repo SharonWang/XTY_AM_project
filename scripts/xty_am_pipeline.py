@@ -19,6 +19,7 @@ import warnings
 
 import matplotlib as mpl
 import matplotlib.pyplot as plt
+from matplotlib.cm import ScalarMappable
 from matplotlib.axes import Axes
 from matplotlib.colors import (
     BoundaryNorm,
@@ -36,9 +37,10 @@ import pandas as pd
 import seaborn as sns
 from scipy import sparse
 from scipy.io import mmwrite
+from scipy.special import expit, logit
 from scipy.sparse import csr_matrix
 from scipy.spatial import cKDTree
-from scipy.stats import false_discovery_control, spearmanr, wilcoxon
+from scipy.stats import false_discovery_control, spearmanr, t as student_t, wilcoxon
 
 if TYPE_CHECKING:
     from anndata import AnnData
@@ -11494,64 +11496,77 @@ def plot_core_contributions(
 
 
 def plot_mhcii_at2_spatial_core(
-    adata, core_id, output_dir=".", file_prefix="MHCII_AT2_continuous",
-    core_col="core_id", donor_col="donor_id", tissue_col="tissue_annotation",
-    celltype_col="CellType_refined", score_col="MHCIIhi_score", spatial_key="spatial",
-    am_labels=("AM", "Alveolar Macrophage"), at2_labels=("AT2",),
-    low_score_color="#E8899B", midpoint_color="#E6DCE8", high_score_color="#5276B5",
-    at2_color="#8B3F76", background_color="#E7E7E7", point_size=13,
-    at2_point_size=None, background_size=5, score_quantiles=(0.02, 0.98),
-    score_limits=None, invert_y=True, show=False, dpi=300,
+    adata,
+    core_id,
+    output_dir=".",
+    file_prefix="MHCII_AT2_continuous",
+    core_col="core_id",
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    celltype_col="CellType_refined",
+    score_col="MHCIIhi_score",
+    spatial_key="spatial",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    at2_display="all",
+    at2_group_col="AT2_VIM_group",
+    at2_group_order=None,
+    at2_group_colors=None,
+    unassigned_at2_label="Unassigned",
+    low_score_color="#E8899B",
+    midpoint_color="#E6DCE8",
+    high_score_color="#5276B5",
+    at2_color="#8B3F76",
+    background_color="#E7E7E7",
+    point_size=13,
+    at2_point_size=None,
+    background_size=5,
+    score_quantiles=(0.02, 0.98),
+    score_limits=None,
+    show_at2_counts=True,
+    legend_outside=False,
+    invert_y=True,
+    show=False,
+    dpi=300,
 ):
-    """Plot one core and export a continuous AM-MHCII/AT2 spatial PDF.
+    """Plot one core and export one continuous-MHCII-score PDF.
 
-    Parameters
-    ----------
-    adata
-        AnnData-like object containing cell metadata and spatial coordinates.
-    core_id, output_dir, file_prefix
-        Core to plot and PDF output location/name prefix.
-    core_col, donor_col, tissue_col, celltype_col, score_col, spatial_key
-        Metadata columns and spatial key.
-    am_labels, at2_labels
-        Values identifying alveolar macrophages and AT2 cells.
-    low_score_color, midpoint_color, high_score_color, at2_color, background_color
-        Supplied macaron plot colors.
-    point_size, at2_point_size, background_size
-        Scatter-point sizes.
-    score_quantiles, score_limits
-        Shared AM color limits from quantiles or explicit ``(vmin, vmax)``.
-    invert_y, show, dpi
-        Coordinate orientation, display behavior, and saved resolution.
-
-    Returns
-    -------
-    pathlib.Path
-        Path to the saved PDF.
+    ``at2_display='all'`` draws every AT2 cell with ``at2_color``.
+    ``at2_display='group'`` colors AT2 cells using ``at2_group_col`` and
+    ``at2_group_colors``. Missing assignments are shown as
+    ``unassigned_at2_label`` rather than silently removed.
     """
+    if at2_display not in {"all", "group"}:
+        raise ValueError("at2_display must be either 'all' or 'group'.")
     required = [core_col, celltype_col, score_col]
+    if at2_display == "group":
+        required.append(at2_group_col)
     missing = [column for column in required if column not in adata.obs.columns]
     if missing:
         raise KeyError(f"Missing adata.obs columns: {missing}")
     if spatial_key not in adata.obsm:
         raise KeyError(f"adata.obsm[{spatial_key!r}] is missing.")
+
     obs = adata.obs.copy()
-    coordinates = np.asarray(adata.obsm[spatial_key], dtype=float)
-    if coordinates.ndim != 2 or coordinates.shape[0] != len(obs) or coordinates.shape[1] < 2:
-        raise ValueError("Spatial coordinates must match cells and contain x/y columns.")
-    if not np.isfinite(coordinates[:, :2]).all():
-        raise ValueError("Spatial coordinates must be finite.")
-    coordinates = coordinates[:, :2]
+    coordinates = np.asarray(adata.obsm[spatial_key])[:, :2]
+    if coordinates.shape[0] != len(obs):
+        raise ValueError("Spatial coordinates and adata.obs have different row counts.")
+
     core_id = str(core_id)
     core_values = obs[core_col].astype(str)
     celltypes = obs[celltype_col].astype(str)
     core_mask = core_values.eq(core_id).to_numpy()
     if not core_mask.any():
         preview = core_values.drop_duplicates().tolist()[:10]
-        raise ValueError(f"Core {core_id!r} was not found. First available core IDs: {preview}")
+        raise ValueError(
+            f"Core {core_id!r} was not found. First available core IDs: {preview}"
+        )
+
+    # Use all AMs in adata for a comparable color scale between separate calls.
     if score_limits is None:
+        all_am_mask = celltypes.isin(am_labels)
         scale_scores = pd.to_numeric(
-            obs.loc[celltypes.isin(am_labels), score_col], errors="coerce"
+            obs.loc[all_am_mask, score_col], errors="coerce"
         ).dropna().to_numpy()
         if scale_scores.size == 0:
             raise ValueError(f"No finite {score_col!r} values were found among AMs.")
@@ -11562,43 +11577,140 @@ def plot_mhcii_at2_spatial_core(
         if len(score_limits) != 2:
             raise ValueError("score_limits must contain exactly (vmin, vmax).")
         score_vmin, score_vmax = map(float, score_limits)
+
     if not np.isfinite(score_vmin) or not np.isfinite(score_vmax):
         raise ValueError("The MHCII score limits must be finite.")
     if score_vmax <= score_vmin:
         score_vmax = score_vmin + 1e-9
+
     score_cmap = LinearSegmentedColormap.from_list(
-        "mhcii_continuous_pink_blue", [low_score_color, midpoint_color, high_score_color], N=256
+        "mhcii_continuous_pink_blue",
+        [low_score_color, midpoint_color, high_score_color],
+        N=256,
     )
     score_norm = Normalize(vmin=score_vmin, vmax=score_vmax, clip=True)
-    core_obs, core_xy = obs.loc[core_mask], coordinates[core_mask]
+
+    core_obs = obs.loc[core_mask]
+    core_xy = coordinates[core_mask]
     core_celltypes = celltypes.loc[core_mask]
     is_am = core_celltypes.isin(am_labels).to_numpy()
     is_at2 = core_celltypes.isin(at2_labels).to_numpy()
+
     am_xy = core_xy[is_am]
-    am_scores = pd.to_numeric(core_obs.loc[is_am, score_col], errors="coerce").to_numpy()
+    am_scores = pd.to_numeric(
+        core_obs.loc[is_am, score_col], errors="coerce"
+    ).to_numpy()
     finite_scores = np.isfinite(am_scores)
     if not finite_scores.any():
         raise ValueError(f"Core {core_id!r} contains no AMs with finite {score_col!r}.")
+
     draw_order = np.argsort(am_scores[finite_scores])
     at2_point_size = point_size + 2 if at2_point_size is None else at2_point_size
+
     fig, ax = plt.subplots(figsize=(5.0, 4.5))
-    ax.scatter(core_xy[:, 0], core_xy[:, 1], s=background_size, c=background_color,
-               linewidths=0, rasterized=True, zorder=0)
-    ax.scatter(core_xy[is_at2, 0], core_xy[is_at2, 1], s=at2_point_size, c=at2_color,
-               linewidths=0, rasterized=True, zorder=2)
-    ax.scatter(am_xy[finite_scores][draw_order, 0], am_xy[finite_scores][draw_order, 1],
-               s=point_size, c=am_scores[finite_scores][draw_order], cmap=score_cmap,
-               norm=score_norm, linewidths=0, rasterized=True, zorder=3)
+    ax.scatter(
+        core_xy[:, 0], core_xy[:, 1], s=background_size,
+        c=background_color, linewidths=0, rasterized=True, zorder=0,
+    )
+    legend_handles = []
+    if at2_display == "all":
+        ax.scatter(
+            core_xy[is_at2, 0], core_xy[is_at2, 1], s=at2_point_size,
+            c=at2_color, linewidths=0, rasterized=True, zorder=2,
+        )
+        at2_label = "AT2"
+        if show_at2_counts:
+            at2_label += f" (n={int(is_at2.sum())})"
+        legend_handles.append(
+            Line2D(
+                [0], [0], marker="o", linestyle="none",
+                markerfacecolor=at2_color, markeredgecolor="none",
+                markersize=6, label=at2_label,
+            )
+        )
+    else:
+        default_group_colors = {
+            "AT2_VIMhi": "#D78AA8",
+            "VIMhi": "#D78AA8",
+            "AT2_VIMlo": "#7FB9A8",
+            "VIMlo": "#7FB9A8",
+            "Ambiguous": "#BFC3C7",
+            unassigned_at2_label: "#D9D9D9",
+        }
+        if at2_group_colors is not None:
+            default_group_colors.update(dict(at2_group_colors))
+
+        at2_groups = core_obs.loc[is_at2, at2_group_col].astype("string")
+        at2_groups = at2_groups.fillna(unassigned_at2_label).astype(str)
+        observed_groups = list(pd.unique(at2_groups))
+        if at2_group_order is None:
+            preferred = [
+                "AT2_VIMhi", "VIMhi", "AT2_VIMlo", "VIMlo",
+                "Ambiguous", unassigned_at2_label,
+            ]
+            group_order = [group for group in preferred if group in observed_groups]
+            group_order.extend(
+                group for group in observed_groups if group not in group_order
+            )
+        else:
+            group_order = [
+                str(group) for group in at2_group_order
+                if str(group) in observed_groups
+            ]
+            group_order.extend(
+                group for group in observed_groups if group not in group_order
+            )
+
+        at2_xy = core_xy[is_at2]
+        fallback_colors = [
+            "#D78AA8", "#7FB9A8", "#E7B97E", "#8FA7D8",
+            "#B79AC8", "#A8B6A1",
+        ]
+        for group_index, group in enumerate(group_order):
+            group_mask = at2_groups.eq(group).to_numpy()
+            group_color = default_group_colors.get(
+                group, fallback_colors[group_index % len(fallback_colors)]
+            )
+            ax.scatter(
+                at2_xy[group_mask, 0], at2_xy[group_mask, 1],
+                s=at2_point_size, c=group_color,
+                linewidths=0, rasterized=True, zorder=2,
+            )
+            group_label = str(group)
+            if show_at2_counts:
+                group_label += f" (n={int(group_mask.sum())})"
+            legend_handles.append(
+                Line2D(
+                    [0], [0], marker="o", linestyle="none",
+                    markerfacecolor=group_color, markeredgecolor="none",
+                    markersize=6, label=group_label,
+                )
+            )
+    ax.scatter(
+        am_xy[finite_scores][draw_order, 0],
+        am_xy[finite_scores][draw_order, 1],
+        s=point_size,
+        c=am_scores[finite_scores][draw_order],
+        cmap=score_cmap,
+        norm=score_norm,
+        linewidths=0,
+        rasterized=True,
+        zorder=3,
+    )
+
     title_parts = [core_id]
-    if donor_col in core_obs:
+    if donor_col in core_obs.columns:
         title_parts.append(str(core_obs[donor_col].iloc[0]))
-    if tissue_col in core_obs:
+    if tissue_col in core_obs.columns:
         title_parts.append(f"tissue {core_obs[tissue_col].iloc[0]}")
     ax.set_title(" | ".join(title_parts), fontsize=11, fontweight="bold")
+
     x_min, x_max = np.nanmin(core_xy[:, 0]), np.nanmax(core_xy[:, 0])
     y_min, y_max = np.nanmin(core_xy[:, 1]), np.nanmax(core_xy[:, 1])
-    ax.set_xlim(x_min - max((x_max - x_min) * 0.025, 1), x_max + max((x_max - x_min) * 0.025, 1))
-    ax.set_ylim(y_min - max((y_max - y_min) * 0.025, 1), y_max + max((y_max - y_min) * 0.025, 1))
+    x_padding = max((x_max - x_min) * 0.025, 1)
+    y_padding = max((y_max - y_min) * 0.025, 1)
+    ax.set_xlim(x_min - x_padding, x_max + x_padding)
+    ax.set_ylim(y_min - y_padding, y_max + y_padding)
     if invert_y:
         ax.invert_yaxis()
     ax.set_aspect("equal")
@@ -11607,23 +11719,42 @@ def plot_mhcii_at2_spatial_core(
     ax.grid(False)
     for spine in ax.spines.values():
         spine.set_visible(False)
-    ax.legend(handles=[Line2D([0], [0], marker="o", linestyle="none",
-                              markerfacecolor=at2_color, markeredgecolor="none",
-                              markersize=6, label="AT2")],
-              loc="upper right", frameon=False, fontsize=8)
-    colorbar = fig.colorbar(mpl.cm.ScalarMappable(norm=score_norm, cmap=score_cmap),
-                            ax=ax, fraction=0.045, pad=0.025)
+
+    legend_kwargs = {
+        "handles": legend_handles,
+        "frameon": False,
+        "fontsize": 8,
+        "title": "AT2 state" if at2_display == "group" else None,
+        "title_fontsize": 8,
+    }
+    if legend_outside:
+        legend_kwargs.update(
+            loc="upper left",
+            # Leave room for the continuous MHCII color bar.
+            bbox_to_anchor=(1.38, 1.0),
+            borderaxespad=0,
+        )
+    else:
+        legend_kwargs.update(loc="upper right")
+    ax.legend(**legend_kwargs)
+    colorbar = fig.colorbar(
+        ScalarMappable(norm=score_norm, cmap=score_cmap),
+        ax=ax, fraction=0.045, pad=0.025,
+    )
     colorbar.set_label("AM MHCIIhi score", fontsize=9)
     colorbar.ax.tick_params(labelsize=8)
+
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     safe_core_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", core_id)
     output_file = output_dir / f"{file_prefix}_{safe_core_id}.pdf"
     fig.savefig(output_file, dpi=dpi, bbox_inches="tight")
+
     if show:
         plt.show()
     else:
         plt.close(fig)
+
     return output_file
 
 
@@ -15367,6 +15498,393 @@ def plot_stage3_categorical_pair_heatmap(
     return fig, axes, tissue_summary
 
 
+def _fit_grouped_quasibinomial(age, successes, totals, grid_size=200):
+    """Fit an intercept-plus-age grouped logistic model by IRLS."""
+    age = np.asarray(age, dtype=float)
+    successes = np.asarray(successes, dtype=float)
+    totals = np.asarray(totals, dtype=float)
+    age_mean = float(np.mean(age))
+    age_sd = float(np.std(age, ddof=0))
+    if age_sd == 0:
+        raise ValueError("Age has no variation across donors.")
+
+    x_age = (age - age_mean) / age_sd
+    X = np.column_stack([np.ones(len(age)), x_age])
+    overall = np.clip(successes.sum() / totals.sum(), 1e-6, 1 - 1e-6)
+    beta = np.array([logit(overall), 0.0])
+
+    for _ in range(100):
+        eta = X @ beta
+        probability = np.clip(expit(eta), 1e-8, 1 - 1e-8)
+        weights = totals * probability * (1 - probability)
+        working = eta + (successes - totals * probability) / weights
+        information = X.T @ (weights[:, None] * X)
+        beta_new = np.linalg.pinv(information) @ (X.T @ (weights * working))
+        if np.max(np.abs(beta_new - beta)) < 1e-10:
+            beta = beta_new
+            break
+        beta = beta_new
+
+    fitted = np.clip(expit(X @ beta), 1e-8, 1 - 1e-8)
+    pearson = np.sum(
+        (successes - totals * fitted) ** 2
+        / (totals * fitted * (1 - fitted))
+    )
+    residual_df = max(len(age) - X.shape[1], 1)
+    dispersion = max(1.0, pearson / residual_df)
+    weights = totals * fitted * (1 - fitted)
+    covariance = np.linalg.pinv(X.T @ (weights[:, None] * X)) * dispersion
+
+    age_grid = np.linspace(age.min(), age.max(), grid_size)
+    grid_x = (age_grid - age_mean) / age_sd
+    X_grid = np.column_stack([np.ones(grid_size), grid_x])
+    eta_grid = X_grid @ beta
+    eta_se = np.sqrt(np.einsum("ij,jk,ik->i", X_grid, covariance, X_grid))
+
+    prediction = pd.DataFrame(
+        {
+            "age": age_grid,
+            "predicted_proportion": expit(eta_grid),
+            "ci_low": expit(eta_grid - 1.96 * eta_se),
+            "ci_high": expit(eta_grid + 1.96 * eta_se),
+        }
+    )
+
+    slope_per_year = beta[1] / age_sd
+    slope_se_per_year = np.sqrt(covariance[1, 1]) / age_sd
+    t_value = slope_per_year / slope_se_per_year
+    model_summary = pd.DataFrame(
+        {
+            "term": ["Age, per 10 years"],
+            "odds_ratio": [np.exp(10 * slope_per_year)],
+            "ci_low": [np.exp(10 * (slope_per_year - 1.96 * slope_se_per_year))],
+            "ci_high": [np.exp(10 * (slope_per_year + 1.96 * slope_se_per_year))],
+            "p_value": [2 * student_t.sf(abs(t_value), df=residual_df)],
+            "dispersion": [dispersion],
+        }
+    )
+    return prediction, model_summary
+
+
+def plot_mhcii_hi_proportion_by_age(
+    adata,
+    group_col="MHCII_group",
+    hi_label="MHCIIhi",
+    donor_col="donor_id",
+    core_col="core_id",
+    age_col="age",
+    tissue_col="tissue_annotation",
+    tissue=None,
+    celltype_col="CellType_refined",
+    am_labels=("AM", "Alveolar Macrophage"),
+    min_am_per_core=1,
+    min_am_per_donor=1,
+    donor_color="#5B8CC0",
+    trend_color="#315F87",
+    ribbon_color="#DCE8F2",
+    core_color="#C9C3D1",
+    annotation_facecolor="#FFF9F0",
+    annotation_edgecolor="#D8CFC4",
+    text_color="#242424",
+    width_cm=9.0,
+    height_cm=8.0,
+    legend_width_cm=3.6,
+    y_max=None,
+    title=None,
+    output_file=None,
+    dpi=300,
+):
+    """
+    Plot MHCIIhi AM proportion against continuous donor age.
+
+    This donor-level quasibinomial analysis is exploratory. Donors are the
+    independent units; core points are descriptive only.
+
+    The numerator is MHCIIhi AMs. The denominator is every AM, including
+    MHCIIlo, ambiguous and unassigned AMs. Individual cores are shown as
+    faded points; solid points are donor-aggregated proportions.
+    """
+    required = [
+        group_col,
+        donor_col,
+        core_col,
+        age_col,
+        celltype_col,
+    ]
+    if tissue is not None:
+        required.append(tissue_col)
+    missing = [column for column in required if column not in adata.obs.columns]
+    if missing:
+        raise KeyError(f"Missing adata.obs columns: {missing}")
+
+    obs = adata.obs.copy()
+    obs[age_col] = pd.to_numeric(obs[age_col], errors="coerce")
+    obs = obs.loc[obs[age_col].notna()].copy()
+    if tissue is not None:
+        allowed_tissues = [tissue] if isinstance(tissue, str) else list(tissue)
+        obs = obs.loc[obs[tissue_col].astype(str).isin(map(str, allowed_tissues))]
+
+    am = obs.loc[obs[celltype_col].astype(str).isin(am_labels)].copy()
+    if am.empty:
+        raise ValueError("No AMs remained after filtering.")
+    am["_is_mhcii_hi"] = am[group_col].astype(str).eq(str(hi_label)).astype(int)
+
+    inconsistent_age = am.groupby(donor_col, observed=True)[age_col].nunique()
+    if (inconsistent_age > 1).any():
+        bad = inconsistent_age[inconsistent_age > 1].index.tolist()[:10]
+        raise ValueError(f"Age is inconsistent within donor(s): {bad}")
+
+    grouping = [donor_col, core_col]
+    core_summary = (
+        am.groupby(grouping, observed=True, dropna=False)
+        .agg(
+            age=(age_col, "first"),
+            n_all_am=("_is_mhcii_hi", "size"),
+            n_mhcii_hi=("_is_mhcii_hi", "sum"),
+        )
+        .reset_index()
+    )
+    core_summary = core_summary.loc[
+        core_summary["n_all_am"] >= min_am_per_core
+    ].copy()
+    core_summary["proportion_mhcii_hi"] = (
+        core_summary["n_mhcii_hi"] / core_summary["n_all_am"]
+    )
+
+    donor_summary = (
+        core_summary.groupby(donor_col, observed=True, dropna=False)
+        .agg(
+            age=("age", "first"),
+            n_cores=(core_col, "nunique"),
+            n_all_am=("n_all_am", "sum"),
+            n_mhcii_hi=("n_mhcii_hi", "sum"),
+        )
+        .reset_index()
+    )
+    donor_summary = donor_summary.loc[
+        donor_summary["n_all_am"] >= min_am_per_donor
+    ].copy()
+    donor_summary["proportion_mhcii_hi"] = (
+        donor_summary["n_mhcii_hi"] / donor_summary["n_all_am"]
+    )
+    if len(donor_summary) < 3:
+        raise ValueError("At least three donors are required to estimate an age trend.")
+
+    prediction, model_summary = _fit_grouped_quasibinomial(
+        donor_summary["age"],
+        donor_summary["n_mhcii_hi"],
+        donor_summary["n_all_am"],
+    )
+
+    cm_to_inch = 1 / 2.54
+    fig, (ax, legend_ax) = plt.subplots(
+        1,
+        2,
+        figsize=(
+            (width_cm + legend_width_cm) * cm_to_inch,
+            height_cm * cm_to_inch,
+        ),
+        gridspec_kw={
+            "width_ratios": [width_cm, legend_width_cm],
+            "wspace": 0.04,
+        },
+        facecolor="white",
+        layout="constrained",
+    )
+    ax.set_facecolor("white")
+    legend_ax.set_facecolor("white")
+    legend_ax.set_axis_off()
+    rng = np.random.default_rng(1234)
+    core_jitter = rng.uniform(-0.35, 0.35, len(core_summary))
+    ax.scatter(
+        core_summary["age"] + core_jitter,
+        core_summary["proportion_mhcii_hi"] * 100,
+        s=15,
+        color=core_color,
+        alpha=0.42,
+        linewidth=0,
+        rasterized=True,
+        zorder=1,
+    )
+
+    donor_sizes = 30 + 78 * np.sqrt(
+        donor_summary["n_all_am"] / donor_summary["n_all_am"].max()
+    )
+    ax.scatter(
+        donor_summary["age"],
+        donor_summary["proportion_mhcii_hi"] * 100,
+        s=donor_sizes,
+        color=donor_color,
+        edgecolor="black",
+        linewidth=0.65,
+        alpha=0.92,
+        zorder=3,
+    )
+    ax.fill_between(
+        prediction["age"].to_numpy(),
+        prediction["ci_low"].to_numpy() * 100,
+        prediction["ci_high"].to_numpy() * 100,
+        color=ribbon_color,
+        alpha=0.82,
+        linewidth=0,
+        zorder=0,
+    )
+    ax.plot(
+        prediction["age"],
+        prediction["predicted_proportion"] * 100,
+        color=trend_color,
+        linewidth=2.15,
+        solid_capstyle="round",
+        zorder=2,
+    )
+
+    result = model_summary.iloc[0]
+    if result["p_value"] < 0.001:
+        p_text = "$P$ < 0.001"
+    else:
+        p_text = f"$P$ = {result['p_value']:.3f}"
+    annotation = (
+        f"OR per 10 years = {result['odds_ratio']:.2f}\n"
+        f"95% CI, {result['ci_low']:.2f}–{result['ci_high']:.2f}\n"
+        f"{p_text}"
+    )
+    ax.text(
+        0.03, 0.97, annotation,
+        transform=ax.transAxes,
+        ha="left", va="top", fontsize=7.7,
+        color=text_color,
+        linespacing=1.35,
+        bbox={
+            "boxstyle": "round,pad=0.38,rounding_size=0.12",
+            "facecolor": annotation_facecolor,
+            "edgecolor": annotation_edgecolor,
+            "linewidth": 0.65,
+            "alpha": 0.96,
+        },
+        zorder=5,
+    )
+
+    observed_max = max(
+        donor_summary["proportion_mhcii_hi"].max(),
+        core_summary["proportion_mhcii_hi"].max(),
+        prediction["ci_high"].max(),
+    ) * 100
+    if y_max is None:
+        y_max = min(100, max(20, np.ceil(observed_max * 1.08 / 10) * 10))
+    ax.set_ylim(0, y_max)
+    ax.margins(x=0.04)
+    ax.set_xlabel("Age (years)", fontsize=9, color=text_color, labelpad=5)
+    ax.set_ylabel(
+        r"%MHCII$^{hi}$ AMs among all AMs",
+        fontsize=9,
+        color=text_color,
+        labelpad=6,
+    )
+    if title is not None:
+        ax.set_title(
+            title,
+            fontsize=10.5,
+            fontweight="bold",
+            color=text_color,
+            pad=9,
+        )
+    ax.yaxis.set_major_formatter(PercentFormatter(xmax=100, decimals=0))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=5))
+    ax.xaxis.set_major_locator(MaxNLocator(nbins=5, integer=True))
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=8,
+        width=0.85,
+        length=3.5,
+        direction="out",
+        color="black",
+        labelcolor=text_color,
+    )
+    ax.grid(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(0.95)
+    ax.spines["bottom"].set_linewidth(0.95)
+    ax.spines["left"].set_color("black")
+    ax.spines["bottom"].set_color("black")
+
+    point_handles = [
+        Line2D(
+            [0], [0], marker="o", linestyle="none",
+            markerfacecolor=core_color, markeredgecolor="none",
+            alpha=0.65, markersize=4.5, label="Core",
+        ),
+        Line2D(
+            [0], [0], marker="o", linestyle="none",
+            markerfacecolor=donor_color, markeredgecolor="black",
+            markeredgewidth=0.6, markersize=6.5, label="Donor",
+        ),
+    ]
+    point_legend = legend_ax.legend(
+        handles=point_handles,
+        loc="upper left",
+        bbox_to_anchor=(0.0, 0.98),
+        frameon=False,
+        fontsize=7.5,
+        handletextpad=0.5,
+        borderaxespad=0,
+        labelspacing=0.45,
+    )
+    legend_ax.add_artist(point_legend)
+
+    count_quantiles = np.quantile(
+        donor_summary["n_all_am"], [0.25, 0.50, 0.75]
+    )
+    count_values = sorted(
+        set(max(1, int(round(value))) for value in count_quantiles)
+    )
+    max_am = donor_summary["n_all_am"].max()
+    size_handles = []
+    for count in count_values:
+        marker_area = 30 + 78 * np.sqrt(count / max_am)
+        size_handles.append(
+            Line2D(
+                [0], [0],
+                marker="o",
+                linestyle="none",
+                markerfacecolor="white",
+                markeredgecolor="black",
+                markeredgewidth=0.6,
+                markersize=np.sqrt(marker_area),
+                label=f"{count:,}",
+            )
+        )
+    legend_ax.legend(
+        handles=size_handles,
+        title="AMs per donor",
+        loc="upper left",
+        bbox_to_anchor=(0.0, 0.62),
+        frameon=False,
+        fontsize=7,
+        title_fontsize=7.5,
+        handletextpad=0.65,
+        borderaxespad=0,
+        labelspacing=0.7,
+    )
+    saved_path = None
+    if output_file is not None:
+        saved_path = Path(output_file)
+        saved_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(saved_path, dpi=dpi, bbox_inches="tight")
+
+    return {
+        "fig": fig,
+        "ax": ax,
+        "legend_ax": legend_ax,
+        "core_summary": core_summary,
+        "donor_summary": donor_summary,
+        "prediction": prediction,
+        "model_summary": model_summary,
+        "output_file": saved_path,
+    }
+
+
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
     "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
@@ -15407,6 +15925,7 @@ __all__ = [
     "plot_stage3_categorical_scale_sensitivity",
     "plot_stage3_primary", "plot_stage3_scale_sensitivity",
     "plot_core_contributions", "plot_mhcii_at2_spatial_core",
+    "plot_mhcii_hi_proportion_by_age",
     "plot_macrophage_pct_by_tissue", "plot_metadata_summary",
     "plot_marker_dotplot", "plot_nhood_enrichment_donor_tissue",
     "plot_program_umap", "plot_radius_core_correlations",
