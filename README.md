@@ -30,7 +30,7 @@ Data locations:
 
 | Environment | Xenium data directory |
 |---|---|
-| Local | `D:/Xiaonan/CODEX_projects/Xiaotong_AM/Spatial/Spatial` |
+| Local | `D:/Xiaonan/CODEX_projects/Xiaotong_AM/Spatial` |
 | HPC | `/dssg/home/acct-svetoslav_chakarov/svetoslav_chakarov/Data/External_Data/Xu_NC2026_human/data/Spatial` |
 
 The main input is `xenium.h5ad`. The complete mouse differential-expression
@@ -39,25 +39,131 @@ question.
 
 ## Notebooks
 
-All notebooks are stored in `notebooks/`. They are the step-wise scientific
-record; reusable calculations and plotting implementations live in the single
-source module described below.
+The 14 supplied notebooks are version-controlled exactly as received on
+2026-09-24. They form the step-wise scientific record; reusable calculations
+and plotting implementations live in the single source module described below.
+Notebook outputs were generated in the project/HPC environment and are retained
+for immediate review. Repository validation checks notebook structure and source
+references without rerunning the full Xenium dataset locally.
 
-| Notebook | Status | Description |
-|---|---|---|
-| `notebooks/00_methodology_data_audit.ipynb` | Implemented and locally executed | Audits the H5AD schema and metadata; displays the complete deposited UMAP; checks macrophage, AT1, and AT2 marker evidence; calculates donor-balanced marker summaries; and maps source labels and macrophage identity evidence in intact tissue cores. It does not finalize AM membership or MHCII states. |
-| `notebooks/01_mouse_MHCII_signature_mapping.ipynb` | Planned | Audits the complete mouse DE table, excludes Cycling AM, maps mouse genes to human orthologues, and records Xenium-panel signature coverage. |
-| `notebooks/02_human_AM_MHCII_states.ipynb` | Planned | Defines the reviewed AM population and evaluates continuous and categorical MHCII-high/low state evidence across donors and cores. |
-| `notebooks/03_AM_spatial_neighborhoods.ipynb` | Planned | Tests AM-state locations, nearest cell types, AT2 distances, multi-radius neighborhoods, and within-core spatial null models. |
-| `notebooks/04_AM_AT2_communication.ipynb` | Planned | Evaluates panel-observable, spatially supported AM–AT2 ligand–receptor candidates in both directions. |
-| `notebooks/05_integrated_statistics_figures.ipynb` | Planned | Performs donor-aware models, sensitivity analyses, final statistical checks, and manuscript figure/source-data assembly. |
-| `notebooks/06_manuscript_methods_results.ipynb` | Planned | Produces reproducible Methods, Results, legends, limitations, and executed manuscript numbers. |
+The notebooks currently append the HPC analysis directory to `sys.path` and use
+`import source`. The version-controlled canonical module is
+`scripts/xty_am_pipeline.py`; the HPC `source.py` copy must correspond to the same
+Git commit before execution.
+
+| Execution order | Notebook | Description |
+|---:|---|---|
+| 1 | `notebooks/01_Metadata_Summary.ipynb` | Cohort and Xenium metadata audit: donors, cores, tissue/TMA annotations, cell counts, and Cell-style metadata summaries. |
+| 2 | `notebooks/02_Myeloid_Refinement.ipynb` | Refines the broad deposited myeloid labels using marker-expression and detection summaries, including separation of alveolar macrophages from interstitial macrophages and monocytes. |
+| 3 | `notebooks/02_MA_Refinement.ipynb` | Refines macrophage states with UMAP, abundance, and two-signature evidence after the myeloid review. |
+| 4 | `notebooks/02_1_AM_MHCII_Scoring.ipynb` | Maps the mouse MHCII differential-expression evidence to human genes, audits Xenium-panel detection, and assigns the AM MHCII score/state used downstream; Cycling AM is outside the analysis question. |
+| 5 | `notebooks/03_Epi_Refinement.ipynb` | Reviews and refines epithelial annotations before AT2-state analysis. |
+| 6 | `notebooks/03_1_AT2_Vim_Scoring.ipynb` | Audits AT2 VIM-state signatures, panel coverage, UMAP placement, and continuous/categorical AT2 VIM scoring. |
+| 7 | `notebooks/04_Merge_Obs_To_Main.ipynb` | Merges reviewed myeloid, AM, epithelial, MHCII, and VIM metadata back into the master AnnData object and checks AM/AT2 abundance by donor. |
+| 8 | `notebooks/05_1A_Unbiased_Niche_Discovery.ipynb` | Stage 1A multitype neighborhood discovery using contact, kNN, radius, and nearest-distance analyses with donor-level summaries. |
+| 9 | `notebooks/05_1B_Focused_AMAT2_Validation.ipynb` | Stage 1B prespecified AM-AT2 validation using the same core-local spatial methods and donor-level inference. |
+| 10 | `notebooks/06_AM_MHCII_AT2_Spatial_Association.ipynb` | Stage 2 continuous AM MHCII-to-AT2 spatial association, balanced-tail sensitivity analysis, donor inference, and scale-sensitivity plots. |
+| 11 | `notebooks/07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` | Primary Stage 3 continuous coupling between AM MHCII score and local or nearest-AT2 VIM score. |
+| 12 | `notebooks/07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` | Secondary Stage 3 categorical MHCIIhi/MHCIIlo and VIMhi/VIMlo sensitivity analyses with explicit exclusion and balance diagnostics. |
+| 13 | `notebooks/08_Spatial_Umap.ipynb` | Ranks core/donor influence, selects clearly labelled non-inferential example cores, and plots MHCII-AM and AT2/VIM spatial distributions. |
+| 14 | `notebooks/09_MHCprop_Age_Correlation.ipynb` | Exploratory donor-level relationship between age and the proportion of all AMs assigned MHCII-high. |
 
 ## Source module
 
 The only reusable Python source file is `scripts/xty_am_pipeline.py`.
 Every public function has a NumPy-style docstring describing parameters,
 returns, errors, and relevant scientific interpretation.
+
+## Function-to-notebook index
+
+This index covers every public function exported by `xty_am_pipeline.py`.
+Detailed behavior, parameters, outputs, and scientific caveats remain in the
+categorized descriptions below and in each function's NumPy-style docstring.
+
+| Function | Used in notebook(s) |
+|---|---|
+| `add_cellchat_groups` | Reusable library function; not called directly by the current notebooks |
+| `add_human_gene_name` | `02_1_AM_MHCII_Scoring.ipynb`<br>`03_1_AT2_Vim_Scoring.ipynb` |
+| `assign_balanced_mhcii_extremes` | Reusable library function; not called directly by the current notebooks |
+| `assign_balanced_mhcii_score_groups` | Reusable library function; not called directly by the current notebooks |
+| `assign_mhcii_single_signature` | `02_1_AM_MHCII_Scoring.ipynb` |
+| `audit_lr_panel` | Reusable library function; not called directly by the current notebooks |
+| `calculate_continuous_spatial_lr` | Reusable library function; not called directly by the current notebooks |
+| `calculate_knn_niche_continuum` | Reusable library function; not called directly by the current notebooks |
+| `calculate_lr_for_core_arrays` | Reusable library function; not called directly by the current notebooks |
+| `calculate_multitype_knn_niche_by_core` | `05_1A_Unbiased_Niche_Discovery.ipynb`<br>`05_1B_Focused_AMAT2_Validation.ipynb` |
+| `calculate_multitype_nearest_distance_by_core` | `05_1A_Unbiased_Niche_Discovery.ipynb`<br>`05_1B_Focused_AMAT2_Validation.ipynb` |
+| `calculate_multitype_nhood_enrichment_by_core` | `05_1A_Unbiased_Niche_Discovery.ipynb`<br>`05_1B_Focused_AMAT2_Validation.ipynb` |
+| `calculate_multitype_radius_niche_by_core` | `05_1A_Unbiased_Niche_Discovery.ipynb`<br>`05_1B_Focused_AMAT2_Validation.ipynb` |
+| `calculate_nhood_enrichment_by_core` | Reusable library function; not called directly by the current notebooks |
+| `calculate_radius_niche_continuum` | Reusable library function; not called directly by the current notebooks |
+| `calculate_stage2_balanced_extremes_by_core` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `calculate_stage2_knn_continuum_by_core` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `calculate_stage2_nearest_at2_by_core` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `calculate_stage2_radius_continuum_by_core` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `calculate_stage3_balanced_extremes_by_core` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `calculate_stage3_categorical_knn_by_core` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
+| `calculate_stage3_categorical_nearest_at2_by_core` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
+| `calculate_stage3_categorical_pair_enrichment_by_core` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
+| `calculate_stage3_categorical_radius_by_core` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
+| `calculate_stage3_knn_continuum_by_core` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `calculate_stage3_nearest_at2_by_core` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `calculate_stage3_radius_continuum_by_core` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `cluster_expression_summary` | `02_Myeloid_Refinement.ipynb` |
+| `compute_program_scores` | Reusable library function; not called directly by the current notebooks |
+| `configure_plot_style` | Reusable library function; not called directly by the current notebooks |
+| `export_spatial_cellchat_inputs` | Reusable library function; not called directly by the current notebooks |
+| `extract_marker_matrices` | Reusable library function; not called directly by the current notebooks |
+| `gene_detection_by_group` | `02_1_AM_MHCII_Scoring.ipynb`<br>`03_1_AT2_Vim_Scoring.ipynb` |
+| `marker_availability_table` | Reusable library function; not called directly by the current notebooks |
+| `merge_obs_to_main` | `04_Merge_Obs_To_Main.ipynb`<br>`07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb`<br>`07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb`<br>`08_Spatial_Umap.ipynb` |
+| `plot_am_at2_pct_by_donor` | `04_Merge_Obs_To_Main.ipynb` |
+| `plot_am_at2_spatial` | Reusable library function; not called directly by the current notebooks |
+| `plot_anndata_group_umap` | `02_1_AM_MHCII_Scoring.ipynb`<br>`02_MA_Refinement.ipynb`<br>`03_1_AT2_Vim_Scoring.ipynb` |
+| `plot_core_contributions` | Reusable library function; not called directly by the current notebooks |
+| `plot_focus_umap` | Reusable library function; not called directly by the current notebooks |
+| `plot_full_umap` | Reusable library function; not called directly by the current notebooks |
+| `plot_knn_niche_continuum` | Reusable library function; not called directly by the current notebooks |
+| `plot_macrophage_pct_by_tissue` | `02_MA_Refinement.ipynb`<br>`02_Myeloid_Refinement.ipynb`<br>`03_Epi_Refinement.ipynb` |
+| `plot_marker_dotplot` | Reusable library function; not called directly by the current notebooks |
+| `plot_metadata_summary` | `01_Metadata_Summary.ipynb` |
+| `plot_mhcii_at2_spatial_core` | `08_Spatial_Umap.ipynb` |
+| `plot_mhcii_hi_proportion_by_age` | `09_MHCprop_Age_Correlation.ipynb` |
+| `plot_nhood_enrichment_donor_tissue` | Reusable library function; not called directly by the current notebooks |
+| `plot_program_umap` | Reusable library function; not called directly by the current notebooks |
+| `plot_radius_core_correlations` | Reusable library function; not called directly by the current notebooks |
+| `plot_spatial_celltypes` | Reusable library function; not called directly by the current notebooks |
+| `plot_spatial_focus` | Reusable library function; not called directly by the current notebooks |
+| `plot_spatial_programs` | Reusable library function; not called directly by the current notebooks |
+| `plot_stage1A_niche_dotmap` | `05_1A_Unbiased_Niche_Discovery.ipynb` |
+| `plot_stage1B_primary` | `05_1B_Focused_AMAT2_Validation.ipynb` |
+| `plot_stage2_primary` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `plot_stage2_scale_sensitivity` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `plot_stage3_categorical_pair_heatmap` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
+| `plot_stage3_categorical_primary` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
+| `plot_stage3_categorical_scale_sensitivity` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
+| `plot_stage3_primary` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `plot_stage3_scale_sensitivity` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `radius_weighted_mean` | Reusable library function; not called directly by the current notebooks |
+| `rank_stage2_core_contributions` | `08_Spatial_Umap.ipynb` |
+| `run_spatial_function_multicore` | `05_1A_Unbiased_Niche_Discovery.ipynb`<br>`05_1B_Focused_AMAT2_Validation.ipynb` |
+| `run_stage2_multicore` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `run_stage3_all_methods` | Reusable library function; not called directly by the current notebooks |
+| `run_stage3_multicore` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb`<br>`07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `save_figure` | Reusable library function; not called directly by the current notebooks |
+| `score_and_assign_two_signatures` | `02_MA_Refinement.ipynb`<br>`03_1_AT2_Vim_Scoring.ipynb` |
+| `select_representative_cores` | Reusable library function; not called directly by the current notebooks |
+| `select_supportive_cores` | `08_Spatial_Umap.ipynb` |
+| `summarise_lr_by_donor` | Reusable library function; not called directly by the current notebooks |
+| `summarize_lr_by_donor` | Reusable library function; not called directly by the current notebooks |
+| `summarize_markers` | Reusable library function; not called directly by the current notebooks |
+| `summarize_nhood_by_donor` | Reusable library function; not called directly by the current notebooks |
+| `summarize_stage1_by_donor_and_tissue` | `05_1A_Unbiased_Niche_Discovery.ipynb`<br>`05_1B_Focused_AMAT2_Validation.ipynb` |
+| `summarize_stage2_by_donor_and_tissue` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `summarize_stage3_by_donor_and_tissue` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb`<br>`07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `test_continuous_mhcii_at2_proximity` | Reusable library function; not called directly by the current notebooks |
+| `test_lr_across_donors` | Reusable library function; not called directly by the current notebooks |
+| `validate_xenium_metadata` | Reusable library function; not called directly by the current notebooks |
 
 ### Validation, selection, and metadata transfer
 
