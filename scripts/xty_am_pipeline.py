@@ -325,12 +325,12 @@ def plot_metadata_summary(
     save: str | Path | None = None,
     dpi: int = 300,
 ) -> dict[str, Any]:
-    """Create a macaron-style overview of the human lung Xenium cohort.
+    """Create the supplied Cell-style overview of the Xenium cohort.
 
-    Core-level variables are reduced to one row per core; age, sex, PMI, and
+    Core-level variables are reduced to one row per core. Age, sex, PMI, and
     TMA are checked for within-donor consistency before donor summaries are
-    created. Inconsistencies are returned and warned about rather than printed
-    with notebook-only display functions.
+    created. Inconsistencies are warned about and returned for audit rather
+    than being shown through a notebook-only display function.
 
     Parameters
     ----------
@@ -338,7 +338,8 @@ def plot_metadata_summary(
         Metadata containing donor_id, core_id, tma_id, age, pmi, sex, and
         tissue_annotation. It may contain repeated cell-level rows.
     tissue_order
-        Preferred display order for tissue annotations.
+        Preferred display order for tissue annotations. Observed categories
+        not listed here are appended and assigned fallback colors.
     save
         Optional output path. The format is inferred from its extension.
     dpi
@@ -355,229 +356,1087 @@ def plot_metadata_summary(
     ValueError
         If required metadata columns are absent or no cores remain.
     """
-    required = {
-        "donor_id", "core_id", "tma_id", "age", "pmi", "sex",
+
+    # =========================================================
+    # 1. Check required columns
+    # =========================================================
+    required_columns = {
+        "donor_id",
+        "core_id",
+        "tma_id",
+        "age",
+        "pmi",
+        "sex",
         "tissue_annotation",
     }
-    missing = sorted(required.difference(unique_meta.columns))
-    if missing:
-        raise ValueError(f"Missing required columns: {missing}")
-    core_meta = unique_meta[list(required)].copy()
-    for column in ("donor_id", "core_id", "tma_id"):
-        core_meta[column] = core_meta[column].astype("string").str.strip()
-    core_meta["sex"] = (
-        core_meta["sex"].astype("string").str.strip().str.upper()
-    )
-    core_meta["tissue_annotation"] = (
-        core_meta["tissue_annotation"].astype("string").str.strip()
-        .fillna("None")
-        .replace({"nan": "None", "NaN": "None", "<NA>": "None",
-                  "NA": "None", "": "None"})
-    )
-    for column in ("age", "pmi"):
-        core_meta[column] = pd.to_numeric(core_meta[column], errors="coerce")
-    core_meta = core_meta.drop_duplicates(subset="core_id").reset_index(drop=True)
-    if core_meta.empty:
-        raise ValueError("No unique cores remain after metadata preparation.")
 
-    donor_variables = ["age", "pmi", "sex", "tma_id"]
-    inconsistent_mask = (
-        core_meta.groupby("donor_id")[donor_variables]
-        .nunique(dropna=False).gt(1)
+    missing_columns = required_columns.difference(
+        unique_meta.columns
     )
-    donor_inconsistency = inconsistent_mask.loc[
-        inconsistent_mask.any(axis=1)
+
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns: "
+            f"{sorted(missing_columns)}"
+        )
+
+    # =========================================================
+    # 2. Prepare core-level metadata
+    # =========================================================
+    core_meta = unique_meta[
+        [
+            "donor_id",
+            "core_id",
+            "tma_id",
+            "age",
+            "pmi",
+            "sex",
+            "tissue_annotation",
+        ]
+    ].copy()
+
+    core_meta["donor_id"] = (
+        core_meta["donor_id"]
+        .astype("string")
+        .str.strip()
+    )
+
+    core_meta["core_id"] = (
+        core_meta["core_id"]
+        .astype("string")
+        .str.strip()
+    )
+
+    core_meta["tma_id"] = (
+        core_meta["tma_id"]
+        .astype("string")
+        .str.strip()
+    )
+
+    core_meta["sex"] = (
+        core_meta["sex"]
+        .astype("string")
+        .str.strip()
+        .str.upper()
+    )
+
+    core_meta["tissue_annotation"] = (
+        core_meta["tissue_annotation"]
+        .astype("string")
+        .str.strip()
+        .fillna("None")
+        .replace(
+            {
+                "nan": "None",
+                "NaN": "None",
+                "<NA>": "None",
+                "NA": "None",
+                "": "None",
+            }
+        )
+    )
+
+    core_meta["age"] = pd.to_numeric(
+        core_meta["age"],
+        errors="coerce",
+    )
+
+    core_meta["pmi"] = pd.to_numeric(
+        core_meta["pmi"],
+        errors="coerce",
+    )
+
+    # Each core contributes only once
+    core_meta = (
+        core_meta
+        .drop_duplicates(subset="core_id")
+        .reset_index(drop=True)
+    )
+
+    if core_meta.empty:
+        raise ValueError(
+            "No unique cores remain after metadata preparation."
+        )
+
+    # =========================================================
+    # 3. Check donor-level metadata consistency
+    # =========================================================
+    donor_variables = [
+        "age",
+        "pmi",
+        "sex",
+        "tma_id",
     ]
+
+    donor_inconsistency = (
+        core_meta
+        .groupby("donor_id")[donor_variables]
+        .nunique(dropna=False)
+        .gt(1)
+    )
+
+    donor_inconsistency = donor_inconsistency.loc[
+        donor_inconsistency.any(axis=1)
+    ]
+
     if not donor_inconsistency.empty:
         warnings.warn(
-            "Inconsistent donor-level metadata detected; inspect the returned "
-            "donor_inconsistency table.",
+            "Inconsistent donor-level metadata detected; inspect the "
+            "returned donor_inconsistency table.",
             RuntimeWarning,
             stacklevel=2,
         )
+
+    # =========================================================
+    # 4. Make donor-level metadata
+    # =========================================================
     donor_meta = (
-        core_meta.sort_values(["donor_id", "core_id"])
+        core_meta
+        .sort_values(["donor_id", "core_id"])
         .groupby("donor_id", as_index=False)
         .agg(
-            age=("age", "first"), pmi=("pmi", "first"),
-            sex=("sex", "first"), tma_id=("tma_id", "first"),
+            age=("age", "first"),
+            pmi=("pmi", "first"),
+            sex=("sex", "first"),
+            tma_id=("tma_id", "first"),
             n_cores=("core_id", "nunique"),
         )
     )
-    tissues_present = core_meta["tissue_annotation"].dropna().unique().tolist()
-    final_tissue_order = [x for x in tissue_order if x in tissues_present]
-    final_tissue_order.extend(x for x in tissues_present if x not in final_tissue_order)
-    tma_order = sorted(core_meta["tma_id"].dropna().astype(str).unique())
-    sex_order = [x for x in ("F", "M") if x in donor_meta["sex"].values]
-    sex_order.extend(x for x in donor_meta["sex"].dropna().unique() if x not in sex_order)
 
-    tissue_colors = dict(TISSUE_PALETTE)
-    fallback = sns.color_palette("pastel", n_colors=max(len(final_tissue_order), 1))
-    for index, tissue in enumerate(final_tissue_order):
-        tissue_colors.setdefault(tissue, mpl.colors.to_hex(fallback[index]))
-    tma_colors = dict(TMA_PALETTE)
+    # =========================================================
+    # 5. Define category orders
+    # =========================================================
+    tissues_present = (
+        core_meta["tissue_annotation"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    final_tissue_order = [
+        tissue
+        for tissue in tissue_order
+        if tissue in tissues_present
+    ]
+
+    final_tissue_order += [
+        tissue
+        for tissue in tissues_present
+        if tissue not in final_tissue_order
+    ]
+
+    tissue_order = final_tissue_order
+
+    tma_order = sorted(
+        core_meta["tma_id"]
+        .dropna()
+        .unique()
+        .tolist()
+    )
+
+    sex_order = [
+        sex
+        for sex in ["F", "M"]
+        if sex in donor_meta["sex"].unique()
+    ]
+
+    sex_order += [
+        sex
+        for sex in donor_meta["sex"].unique()
+        if sex not in sex_order
+    ]
+
+    # =========================================================
+    # 6. Macaron colors
+    # =========================================================
+    tissue_colors = {
+        "A": "#F1B6B2",       # strawberry
+        "B": "#CDB9DD",       # lavender
+        "V": "#AFCFE3",       # blueberry
+        "None": "#D9D6D2",    # grey
+    }
+
+    fallback_colors = sns.color_palette(
+        "pastel",
+        n_colors=max(len(tissue_order), 1),
+    )
+
+    for index, tissue in enumerate(tissue_order):
+        if tissue not in tissue_colors:
+            tissue_colors[tissue] = fallback_colors[index]
+
+    sex_colors = {
+        "F": "#D5B8DF",
+        "M": "#A9D5CE",
+    }
+
+    tma_colors = {
+        "TMA1": "#F3C8A8",
+        "TMA2": "#BFD8C2",
+    }
+
+    for index, sex in enumerate(sex_order):
+        if sex not in sex_colors:
+            sex_colors[sex] = fallback_colors[
+                index % len(fallback_colors)
+            ]
+
     for index, tma in enumerate(tma_order):
-        tma_colors.setdefault(tma, mpl.colors.to_hex(fallback[index % len(fallback)]))
+        if tma not in tma_colors:
+            tma_colors[tma] = fallback_colors[
+                index % len(fallback_colors)
+            ]
 
+    # =========================================================
+    # 7. Summary tables
+    # =========================================================
     tissue_counts = (
-        core_meta["tissue_annotation"].value_counts()
-        .reindex(final_tissue_order, fill_value=0)
-        .rename_axis("tissue_annotation").reset_index(name="n_cores")
+        core_meta["tissue_annotation"]
+        .value_counts()
+        .reindex(tissue_order, fill_value=0)
+        .rename_axis("tissue_annotation")
+        .reset_index(name="n_cores")
     )
-    tissue_by_tma_counts = pd.crosstab(
-        core_meta["tma_id"], core_meta["tissue_annotation"]
-    ).reindex(index=tma_order, columns=final_tissue_order, fill_value=0)
-    tissue_by_tma_pct = tissue_by_tma_counts.div(
-        tissue_by_tma_counts.sum(axis=1).replace(0, np.nan), axis=0
-    ).mul(100).fillna(0)
-    donor_tissue_counts = pd.crosstab(
-        core_meta["donor_id"], core_meta["tissue_annotation"]
-    ).reindex(columns=final_tissue_order, fill_value=0)
-    n_female = int(donor_meta["sex"].eq("F").sum())
-    n_male = int(donor_meta["sex"].eq("M").sum())
-    cohort_summary = pd.DataFrame({
-        "Metric": [
-            "Donors", "Cores", "Female donors", "Male donors",
-            "Median age", "Minimum age", "Maximum age", "Median PMI",
-            "Minimum PMI", "Maximum PMI",
-        ],
-        "Value": [
-            donor_meta["donor_id"].nunique(), core_meta["core_id"].nunique(),
-            n_female, n_male, donor_meta["age"].median(),
-            donor_meta["age"].min(), donor_meta["age"].max(),
-            donor_meta["pmi"].median(), donor_meta["pmi"].min(),
-            donor_meta["pmi"].max(),
-        ],
-    })
 
-    configure_plot_style()
-    figure = plt.figure(figsize=(17, 13), constrained_layout=True)
-    grid = figure.add_gridspec(3, 4, height_ratios=[0.68, 2.1, 3.3])
-    card_specs = [
-        ("DONORS", str(len(donor_meta)), f"{n_female} female · {n_male} male", "#F1B6B2"),
-        ("CORES", str(len(core_meta)), f"{len(tma_order)} tissue microarrays", "#BFD8C2"),
-        ("AGE", f"{donor_meta['age'].median():g} years", "median", "#CDB9DD"),
-        ("PMI", f"{donor_meta['pmi'].median():g} hours", "median", "#F3C8A8"),
-    ]
-    for column, (title, value, subtitle, color) in enumerate(card_specs):
-        axis = figure.add_subplot(grid[0, column])
-        axis.set_axis_off()
-        axis.add_patch(FancyBboxPatch(
-            (0.02, 0.08), 0.96, 0.84,
-            boxstyle="round,pad=0.02,rounding_size=0.06",
-            edgecolor=color, facecolor=color, alpha=0.45,
-            transform=axis.transAxes,
-        ))
-        axis.text(0.07, 0.71, title, transform=axis.transAxes,
-                  fontsize=10, weight="bold", color="#555555")
-        axis.text(0.07, 0.42, value, transform=axis.transAxes,
-                  fontsize=21, weight="bold")
-        axis.text(0.07, 0.18, subtitle, transform=axis.transAxes,
-                  fontsize=9, color="#666666")
-
-    ax1 = figure.add_subplot(grid[1, 0])
-    bars = ax1.bar(
-        tissue_counts["tissue_annotation"], tissue_counts["n_cores"],
-        color=[tissue_colors[x] for x in tissue_counts["tissue_annotation"]],
-        edgecolor=DARK_TEXT,
-    )
-    ax1.bar_label(bars, padding=3)
-    ax1.set(title="Core distribution", xlabel="Tissue annotation",
-            ylabel="Number of cores")
-
-    ax2 = figure.add_subplot(grid[1, 1])
-    bottom = np.zeros(len(tma_order))
-    for tissue in final_tissue_order:
-        values = tissue_by_tma_pct[tissue].to_numpy()
-        ax2.bar(tma_order, values, bottom=bottom, color=tissue_colors[tissue],
-                edgecolor="white", label=tissue)
-        bottom += values
-    ax2.set(title="Tissue composition by TMA", ylabel="Core composition (%)",
-            ylim=(0, 100))
-    ax2.legend(title="Tissue", frameon=False, fontsize=8)
-
-    ax3 = figure.add_subplot(grid[1, 2])
-    age_groups = [
-        donor_meta.loc[donor_meta["sex"].eq(sex), "age"].dropna().to_numpy()
-        for sex in sex_order
-    ]
-    boxplot = ax3.boxplot(
-        age_groups, tick_labels=sex_order, patch_artist=True, widths=0.52,
-        medianprops={"color": DARK_TEXT},
-    )
-    for patch, sex in zip(boxplot["boxes"], sex_order):
-        patch.set_facecolor(SEX_PALETTE.get(sex, "#D9D6D2"))
-        patch.set_edgecolor(DARK_TEXT)
-    for position, (sex, values) in enumerate(zip(sex_order, age_groups), start=1):
-        offsets = np.linspace(-0.08, 0.08, len(values)) if len(values) > 1 else [0]
-        ax3.scatter(
-            position + np.asarray(offsets), values,
-            color=SEX_PALETTE.get(sex, "#D9D6D2"), edgecolor=DARK_TEXT,
-            linewidth=0.6, s=34, zorder=3,
+    tissue_by_tma_counts = (
+        pd.crosstab(
+            core_meta["tma_id"],
+            core_meta["tissue_annotation"],
         )
-    ax3.set(title="Donor age distribution", xlabel="Sex", ylabel="Age (years)")
-
-    ax4 = figure.add_subplot(grid[1, 3])
-    donor_plot = donor_meta.sort_values(["n_cores", "donor_id"], ascending=[False, True])
-    ax4.bar(donor_plot["donor_id"], donor_plot["n_cores"],
-            color=[tma_colors.get(str(x), "#D9D6D2") for x in donor_plot["tma_id"]])
-    ax4.tick_params(axis="x", rotation=90)
-    ax4.set(title="Sampling depth per donor", xlabel="Donor",
-            ylabel="Number of cores")
-
-    ax5 = figure.add_subplot(grid[2, :2])
-    slots = core_meta["core_id"].str.extract(r"\.c(\d+)$", expand=False)
-    fallback_slots = core_meta.groupby("donor_id").cumcount().add(1).astype(str)
-    core_meta["_core_slot"] = slots.fillna(fallback_slots)
-    slot_order = sorted(core_meta["_core_slot"].unique(), key=lambda x: int(x) if str(x).isdigit() else str(x))
-    donor_order = donor_meta.sort_values(["tma_id", "age", "donor_id"])["donor_id"]
-    donor_core_grid = core_meta.pivot_table(
-        index="donor_id", columns="_core_slot", values="tissue_annotation",
-        aggfunc="first",
-    ).reindex(index=donor_order, columns=slot_order)
-    tissue_code = {tissue: index for index, tissue in enumerate(final_tissue_order)}
-    numeric_grid = donor_core_grid.map(tissue_code.get).to_numpy(dtype=float)
-    color_map = ListedColormap(
-        [tissue_colors[x] for x in final_tissue_order]
-    ).with_extremes(bad="white")
-    ax5.imshow(
-        np.ma.masked_invalid(numeric_grid), aspect="auto", cmap=color_map,
-        norm=BoundaryNorm(np.arange(len(final_tissue_order) + 1) - 0.5,
-                          color_map.N),
+        .reindex(
+            index=tma_order,
+            columns=tissue_order,
+            fill_value=0,
+        )
     )
-    ax5.set_xticks(np.arange(len(slot_order)), labels=[f"Core {x}" for x in slot_order])
-    ax5.set_yticks(np.arange(len(donor_order)), labels=donor_order)
-    ax5.set_title("Donor–core tissue map", loc="left")
-    ax5.legend(handles=[Patch(facecolor=tissue_colors[x], label=x)
-                        for x in final_tissue_order], frameon=False,
-               title="Tissue", bbox_to_anchor=(1.02, 1), loc="upper left")
 
-    ax6 = figure.add_subplot(grid[2, 2:])
-    sns.scatterplot(data=donor_meta, x="age", y="pmi", hue="sex",
-                    palette=SEX_PALETTE, style="tma_id", s=100, ax=ax6)
-    for row in donor_meta.itertuples():
-        ax6.annotate(row.donor_id, (row.age, row.pmi), xytext=(4, 4),
-                     textcoords="offset points", fontsize=7)
-    ax6.set(title="Age and post-mortem interval", xlabel="Age (years)",
-            ylabel="PMI (hours)")
-    ax6.legend(frameon=False, bbox_to_anchor=(1.02, 1), loc="upper left")
-    for axis in (ax1, ax2, ax3, ax4, ax5, ax6):
+    tissue_by_tma_pct = (
+        tissue_by_tma_counts
+        .div(
+            tissue_by_tma_counts
+            .sum(axis=1)
+            .replace(0, np.nan),
+            axis=0,
+        )
+        .mul(100)
+        .fillna(0)
+    )
+
+    donor_tissue_counts = (
+        pd.crosstab(
+            core_meta["donor_id"],
+            core_meta["tissue_annotation"],
+        )
+        .reindex(
+            columns=tissue_order,
+            fill_value=0,
+        )
+    )
+
+    n_female = int(
+        donor_meta["sex"].eq("F").sum()
+    )
+
+    n_male = int(
+        donor_meta["sex"].eq("M").sum()
+    )
+
+    cohort_summary = pd.DataFrame(
+        {
+            "Metric": [
+                "Donors",
+                "Cores",
+                "Female donors",
+                "Male donors",
+                "Median age",
+                "Minimum age",
+                "Maximum age",
+                "Median PMI",
+                "Minimum PMI",
+                "Maximum PMI",
+            ],
+            "Value": [
+                donor_meta["donor_id"].nunique(),
+                core_meta["core_id"].nunique(),
+                n_female,
+                n_male,
+                donor_meta["age"].median(),
+                donor_meta["age"].min(),
+                donor_meta["age"].max(),
+                donor_meta["pmi"].median(),
+                donor_meta["pmi"].min(),
+                donor_meta["pmi"].max(),
+            ],
+        }
+    )
+
+    # =========================================================
+    # 8. Plot style
+    # =========================================================
+    sns.set_theme(
+        style="white",
+        context="notebook",
+        font_scale=0.95,
+    )
+
+    plt.rcParams.update(
+        {
+            "axes.grid": False,
+            "axes.edgecolor": "#333333",
+            "axes.linewidth": 0.8,
+            "xtick.color": "#333333",
+            "ytick.color": "#333333",
+            "text.color": "#222222",
+            "axes.labelcolor": "#222222",
+            "pdf.fonttype": 42,
+            "ps.fonttype": 42,
+        }
+    )
+
+    fig = plt.figure(
+        figsize=(17, 13),
+        constrained_layout=True,
+        facecolor="white",
+    )
+
+    grid = fig.add_gridspec(
+        nrows=3,
+        ncols=4,
+        height_ratios=[0.68, 2.1, 3.3],
+    )
+
+    # =========================================================
+    # 9. Summary cards
+    # =========================================================
+    card_specs = [
+        {
+            "title": "DONORS",
+            "value": (
+                f"{donor_meta['donor_id'].nunique()}"
+            ),
+            "subtitle": (
+                f"{n_female} female · {n_male} male"
+            ),
+            "color": "#F1B6B2",
+        },
+        {
+            "title": "CORES",
+            "value": (
+                f"{core_meta['core_id'].nunique()}"
+            ),
+            "subtitle": (
+                f"{len(tma_order)} tissue microarrays"
+            ),
+            "color": "#BFD8C2",
+        },
+        {
+            "title": "AGE",
+            "value": (
+                f"{donor_meta['age'].median():g} years"
+            ),
+            "subtitle": (
+                f"median · range "
+                f"{donor_meta['age'].min():g}–"
+                f"{donor_meta['age'].max():g}"
+            ),
+            "color": "#CDB9DD",
+        },
+        {
+            "title": "PMI",
+            "value": (
+                f"{donor_meta['pmi'].median():g} hours"
+            ),
+            "subtitle": (
+                f"median · range "
+                f"{donor_meta['pmi'].min():g}–"
+                f"{donor_meta['pmi'].max():g}"
+            ),
+            "color": "#F3C8A8",
+        },
+    ]
+
+    def add_summary_card(ax, card):
+        ax.set_axis_off()
+        ax.grid(False)
+
+        rounded_box = FancyBboxPatch(
+            (0.02, 0.08),
+            0.96,
+            0.84,
+            boxstyle=(
+                "round,pad=0.02,"
+                "rounding_size=0.06"
+            ),
+            linewidth=1.2,
+            edgecolor=card["color"],
+            facecolor=card["color"],
+            alpha=0.45,
+            transform=ax.transAxes,
+        )
+
+        ax.add_patch(rounded_box)
+
+        ax.text(
+            0.07,
+            0.71,
+            card["title"],
+            transform=ax.transAxes,
+            fontsize=10,
+            fontweight="bold",
+            color="#555555",
+            va="center",
+        )
+
+        ax.text(
+            0.07,
+            0.43,
+            card["value"],
+            transform=ax.transAxes,
+            fontsize=21,
+            fontweight="bold",
+            color="#292929",
+            va="center",
+        )
+
+        ax.text(
+            0.07,
+            0.19,
+            card["subtitle"],
+            transform=ax.transAxes,
+            fontsize=9,
+            color="#666666",
+            va="center",
+        )
+
+    for column_index, card in enumerate(card_specs):
+        card_axis = fig.add_subplot(
+            grid[0, column_index]
+        )
+
+        add_summary_card(
+            card_axis,
+            card,
+        )
+
+    # =========================================================
+    # 10. Core counts by tissue
+    # =========================================================
+    ax1 = fig.add_subplot(grid[1, 0])
+
+    bar_colors = [
+        tissue_colors[tissue]
+        for tissue in tissue_counts[
+            "tissue_annotation"
+        ]
+    ]
+
+    bars = ax1.bar(
+        tissue_counts["tissue_annotation"],
+        tissue_counts["n_cores"],
+        color=bar_colors,
+        edgecolor="#333333",
+        linewidth=0.8,
+        width=0.68,
+    )
+
+    maximum_core_count = max(
+        tissue_counts["n_cores"].max(),
+        1,
+    )
+
+    ax1.set_ylim(
+        0,
+        maximum_core_count * 1.18,
+    )
+
+    for bar in bars:
+        ax1.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() +
+            maximum_core_count * 0.025,
+            f"{int(bar.get_height())}",
+            ha="center",
+            va="bottom",
+            fontsize=10,
+            fontweight="bold",
+        )
+
+    ax1.set_title(
+        "Core distribution",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    ax1.set_xlabel("Tissue annotation")
+    ax1.set_ylabel("Number of cores")
+    ax1.grid(False)
+
+    sns.despine(
+        ax=ax1,
+        top=True,
+        right=True,
+    )
+
+    # =========================================================
+    # 11. Tissue composition by TMA
+    # =========================================================
+    ax2 = fig.add_subplot(grid[1, 1])
+
+    bottom = np.zeros(len(tma_order))
+
+    for tissue in tissue_order:
+        values = tissue_by_tma_pct[
+            tissue
+        ].to_numpy()
+
+        ax2.bar(
+            tma_order,
+            values,
+            bottom=bottom,
+            color=tissue_colors[tissue],
+            edgecolor="white",
+            linewidth=1.2,
+            width=0.65,
+            label=tissue,
+        )
+
+        for position, value, start in zip(
+            range(len(tma_order)),
+            values,
+            bottom,
+        ):
+            if value >= 7:
+                ax2.text(
+                    position,
+                    start + value / 2,
+                    f"{value:.0f}%",
+                    ha="center",
+                    va="center",
+                    fontsize=9,
+                    fontweight="bold",
+                    color="#333333",
+                )
+
+        bottom += values
+
+    ax2.set_ylim(0, 100)
+
+    ax2.set_title(
+        "Tissue composition by TMA",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    ax2.set_xlabel("")
+    ax2.set_ylabel("Core composition (%)")
+    ax2.grid(False)
+
+    ax2.legend(
+        title="Tissue",
+        frameon=False,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        borderaxespad=0,
+    )
+
+    sns.despine(
+        ax=ax2,
+        top=True,
+        right=True,
+    )
+
+    # =========================================================
+    # 12. Donor age by sex
+    # =========================================================
+    ax3 = fig.add_subplot(grid[1, 2])
+
+    sns.boxplot(
+        data=donor_meta,
+        x="sex",
+        y="age",
+        order=sex_order,
+        hue="sex",
+        hue_order=sex_order,
+        palette=sex_colors,
+        legend=False,
+        width=0.52,
+        linewidth=1,
+        fliersize=0,
+        ax=ax3,
+    )
+
+    sns.stripplot(
+        data=donor_meta,
+        x="sex",
+        y="age",
+        order=sex_order,
+        hue="sex",
+        hue_order=sex_order,
+        palette=sex_colors,
+        legend=False,
+        jitter=0.13,
+        size=7,
+        alpha=0.95,
+        edgecolor="#333333",
+        linewidth=0.7,
+        ax=ax3,
+    )
+
+    sex_counts = donor_meta["sex"].value_counts()
+
+    # Explicit ticks avoid set_ticklabels warning
+    ax3.set_xticks(
+        np.arange(len(sex_order)),
+        labels=[
+            (
+                f"{sex}\n"
+                f"(n={sex_counts.get(sex, 0)})"
+            )
+            for sex in sex_order
+        ],
+    )
+
+    ax3.set_title(
+        "Donor age distribution",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    ax3.set_xlabel("Sex")
+    ax3.set_ylabel("Age (years)")
+    ax3.grid(False)
+
+    sns.despine(
+        ax=ax3,
+        top=True,
+        right=True,
+    )
+
+    # =========================================================
+    # 13. Number of cores per donor
+    # =========================================================
+    ax4 = fig.add_subplot(grid[1, 3])
+
+    donor_core_plot = donor_meta.sort_values(
+        ["n_cores", "age", "donor_id"],
+        ascending=[False, True, True],
+    ).copy()
+
+    donor_bar_colors = (
+        donor_core_plot["tma_id"]
+        .map(tma_colors)
+        .fillna("#D9D6D2")
+    )
+
+    ax4.bar(
+        np.arange(len(donor_core_plot)),
+        donor_core_plot["n_cores"],
+        color=donor_bar_colors,
+        edgecolor="#333333",
+        linewidth=0.7,
+        width=0.72,
+    )
+
+    ax4.set_xticks(
+        np.arange(len(donor_core_plot)),
+        labels=donor_core_plot["donor_id"],
+        rotation=90,
+    )
+
+    ax4.set_ylim(
+        0,
+        max(
+            donor_core_plot["n_cores"].max() + 1,
+            2,
+        ),
+    )
+
+    ax4.set_title(
+        "Sampling depth per donor",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    ax4.set_xlabel("Donor")
+    ax4.set_ylabel("Number of cores")
+    ax4.grid(False)
+
+    ax4.legend(
+        handles=[
+            Patch(
+                facecolor=tma_colors.get(
+                    tma,
+                    "#D9D6D2",
+                ),
+                edgecolor="#333333",
+                label=tma,
+            )
+            for tma in tma_order
+        ],
+        title="Array",
+        frameon=False,
+        loc="upper right",
+    )
+
+    sns.despine(
+        ax=ax4,
+        top=True,
+        right=True,
+    )
+
+    # =========================================================
+    # 14. Donor × core tissue map
+    # =========================================================
+    ax5 = fig.add_subplot(grid[2, 0:2])
+
+    # Extract core number from names such as D11.c1
+    extracted_core_slot = (
+        core_meta["core_id"]
+        .str.extract(
+            r"\.c(\d+)$",
+            expand=False,
+        )
+    )
+
+    fallback_core_slot = (
+        core_meta
+        .groupby("donor_id")
+        .cumcount()
+        .add(1)
+        .astype(str)
+    )
+
+    core_meta["_core_slot"] = (
+        extracted_core_slot
+        .fillna(fallback_core_slot)
+        .astype(str)
+    )
+
+    def natural_sort_key(value):
+        value = str(value)
+
+        if value.isdigit():
+            return 0, int(value)
+
+        return 1, value
+
+    slot_order = sorted(
+        core_meta["_core_slot"].unique(),
+        key=natural_sort_key,
+    )
+
+    donor_order = (
+        donor_meta
+        .sort_values(
+            ["tma_id", "age", "donor_id"]
+        )["donor_id"]
+        .tolist()
+    )
+
+    donor_core_grid = (
+        core_meta
+        .pivot_table(
+            index="donor_id",
+            columns="_core_slot",
+            values="tissue_annotation",
+            aggfunc="first",
+        )
+        .reindex(
+            index=donor_order,
+            columns=slot_order,
+        )
+    )
+
+    tissue_code = {
+        tissue: index
+        for index, tissue in enumerate(
+            tissue_order
+        )
+    }
+
+    # Safe mapping:
+    # categorical values become numbers and pd.NA becomes NaN
+    numeric_grid = donor_core_grid.apply(
+        lambda column: (
+            column
+            .astype("string")
+            .map(tissue_code)
+        )
+    )
+
+    numeric_array = numeric_grid.to_numpy(
+        dtype=float,
+        na_value=np.nan,
+    )
+
+    masked_grid = np.ma.masked_invalid(
+        numeric_array
+    )
+
+    color_map = ListedColormap(
+        [
+            tissue_colors[tissue]
+            for tissue in tissue_order
+        ]
+    )
+
+    color_map.set_bad("#FFFFFF")
+
+    color_norm = BoundaryNorm(
+        np.arange(
+            -0.5,
+            len(tissue_order) + 0.5,
+            1,
+        ),
+        color_map.N,
+    )
+
+    # pcolormesh provides cell borders without using axis grids
+    ax5.pcolormesh(
+        masked_grid,
+        cmap=color_map,
+        norm=color_norm,
+        shading="flat",
+        edgecolors="white",
+        linewidth=2,
+    )
+
+    n_donors, n_slots = donor_core_grid.shape
+
+    ax5.set_xlim(0, n_slots)
+    ax5.set_ylim(n_donors, 0)
+
+    ax5.set_xticks(
+        np.arange(n_slots) + 0.5,
+        labels=[
+            f"Core c{slot}"
+            for slot in slot_order
+        ],
+    )
+
+    donor_lookup = donor_meta.set_index(
+        "donor_id"
+    )
+
+    donor_labels = []
+
+    for donor in donor_order:
+        donor_information = donor_lookup.loc[
+            donor
+        ]
+
+        donor_labels.append(
+            f"{donor} | "
+            f"{donor_information['age']:g} y | "
+            f"{donor_information['sex']} | "
+            f"{donor_information['tma_id']}"
+        )
+
+    ax5.set_yticks(
+        np.arange(n_donors) + 0.5,
+        labels=donor_labels,
+    )
+
+    ax5.tick_params(
+        axis="y",
+        labelsize=8.5,
+        length=0,
+    )
+
+    ax5.tick_params(
+        axis="x",
+        labelsize=9,
+        length=0,
+    )
+
+    # Add the tissue label inside each occupied tile
+    for row_index in range(n_donors):
+        for column_index in range(n_slots):
+            tissue = donor_core_grid.iloc[
+                row_index,
+                column_index,
+            ]
+
+            if pd.notna(tissue):
+                ax5.text(
+                    column_index + 0.5,
+                    row_index + 0.5,
+                    str(tissue),
+                    ha="center",
+                    va="center",
+                    fontsize=8,
+                    fontweight="bold",
+                    color="#333333",
+                )
+
+    # Separate TMAs with one solid boundary line
+    ordered_tma = (
+        donor_lookup
+        .loc[donor_order, "tma_id"]
+        .to_numpy()
+    )
+
+    for row_index in range(
+        len(ordered_tma) - 1
+    ):
+        if (
+            ordered_tma[row_index]
+            != ordered_tma[row_index + 1]
+        ):
+            ax5.axhline(
+                row_index + 1,
+                color="#333333",
+                linewidth=1.3,
+            )
+
+    ax5.set_title(
+        "Donor–core tissue map",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    ax5.set_xlabel("")
+    ax5.set_ylabel("Donor metadata")
+    ax5.grid(False)
+
+    ax5.legend(
+        handles=[
+            Patch(
+                facecolor=tissue_colors[tissue],
+                edgecolor="#555555",
+                linewidth=0.5,
+                label=tissue,
+            )
+            for tissue in tissue_order
+        ],
+        title="Tissue annotation",
+        frameon=False,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        borderaxespad=0,
+    )
+
+    for spine in ax5.spines.values():
+        spine.set_visible(False)
+
+    # =========================================================
+    # 15. Age versus PMI
+    # =========================================================
+    ax6 = fig.add_subplot(grid[2, 2:4])
+
+    sns.scatterplot(
+        data=donor_meta,
+        x="age",
+        y="pmi",
+        hue="sex",
+        hue_order=sex_order,
+        palette=sex_colors,
+        style="tma_id",
+        style_order=tma_order,
+        s=115,
+        edgecolor="#333333",
+        linewidth=0.8,
+        alpha=0.95,
+        ax=ax6,
+    )
+
+    for _, donor_row in donor_meta.iterrows():
+        ax6.annotate(
+            donor_row["donor_id"],
+            (
+                donor_row["age"],
+                donor_row["pmi"],
+            ),
+            xytext=(4, 4),
+            textcoords="offset points",
+            fontsize=7.5,
+            color="#555555",
+        )
+
+    ax6.set_title(
+        "Age and post-mortem interval",
+        loc="left",
+        fontsize=12,
+        fontweight="bold",
+    )
+
+    ax6.set_xlabel("Age (years)")
+    ax6.set_ylabel("PMI (hours)")
+    ax6.grid(False)
+
+    ax6.legend(
+        frameon=False,
+        bbox_to_anchor=(1.02, 1),
+        loc="upper left",
+        borderaxespad=0,
+    )
+
+    sns.despine(
+        ax=ax6,
+        top=True,
+        right=True,
+    )
+
+    # =========================================================
+    # 16. Final global formatting
+    # =========================================================
+    all_axes = [
+        ax1,
+        ax2,
+        ax3,
+        ax4,
+        ax5,
+        ax6,
+    ]
+
+    # Ensure no plot has background grid lines
+    for axis in all_axes:
         axis.grid(False)
         axis.set_facecolor("white")
-    figure.suptitle("Human lung Xenium cohort overview", x=0.01, ha="left",
-                    fontsize=18, weight="bold")
+
+    fig.suptitle(
+        "Human lung Xenium cohort overview",
+        fontsize=18,
+        fontweight="bold",
+        x=0.01,
+        ha="left",
+    )
+
+    # =========================================================
+    # 17. Save
+    # =========================================================
     if save is not None:
-        figure.savefig(save, dpi=dpi, bbox_inches="tight", facecolor="white")
+        fig.savefig(
+            save,
+            dpi=dpi,
+            bbox_inches="tight",
+            facecolor="white",
+        )
+
     return {
-        "fig": figure,
-        "core_meta": core_meta.drop(columns="_core_slot", errors="ignore"),
+        "fig": fig,
+        "core_meta": core_meta.drop(
+            columns="_core_slot",
+            errors="ignore",
+        ),
         "donor_meta": donor_meta,
         "donor_inconsistency": donor_inconsistency,
         "cohort_summary": cohort_summary,
         "tissue_counts": tissue_counts,
-        "tissue_by_tma_counts": tissue_by_tma_counts,
-        "tissue_by_tma_pct": tissue_by_tma_pct,
-        "donor_tissue_counts": donor_tissue_counts,
+        "tissue_by_tma_counts": (
+            tissue_by_tma_counts
+        ),
+        "tissue_by_tma_pct": (
+            tissue_by_tma_pct
+        ),
+        "donor_tissue_counts": (
+            donor_tissue_counts
+        ),
     }
 
 

@@ -196,7 +196,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 
 | Function | Description |
 |---|---|
-| `plot_metadata_summary` | Creates a macaron-style cohort overview and returns unique core, donor, consistency, tissue, and TMA summary tables. |
+| `plot_metadata_summary` | Creates the supplied Cell-style cohort overview with donor/core cards, tissue and TMA composition, donor age, sampling depth, a labelled donor–core tissue map, and age–PMI context. It returns unique core, donor, inconsistency, tissue, and TMA summary tables. |
 | `plot_macrophage_pct_by_tissue` | Plots donor-level macrophage abundance by tissue after averaging multiple cores per donor/tissue; performs paired Wilcoxon tests and Benjamini–Hochberg correction. |
 | `plot_am_at2_pct_by_donor` | Calculates the percentage of all cells that are AM or AT2 in each core and plots core-level values grouped by donor and colored by tissue. |
 

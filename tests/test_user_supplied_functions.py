@@ -258,6 +258,62 @@ def test_plot_metadata_summary_returns_core_and_donor_units():
     plt.close(output["fig"])
 
 
+def test_plot_metadata_summary_uses_supplied_cards_and_labeled_core_map(
+    tmp_path,
+):
+    """The supplied metadata design must retain ranges and labeled core tiles."""
+    metadata = pd.DataFrame(
+        {
+            "donor_id": ["D1", "D1", "D2", "D3"],
+            "core_id": ["D1.c1", "D1.c2", "D2.c1", "D3.c1"],
+            "tma_id": ["TMA1", "TMA1", "TMA2", "TMA2"],
+            "age": [50, 50, 60, 70],
+            "pmi": [8, 8, 10, 12],
+            "sex": ["F", "F", "M", "F"],
+            "tissue_annotation": ["A", "B", "V", None],
+        }
+    )
+    output_path = tmp_path / "metadata_summary.png"
+
+    output = pipeline.plot_metadata_summary(metadata, save=output_path)
+
+    figure = output["fig"]
+    all_text = {text.get_text() for axis in figure.axes for text in axis.texts}
+    assert any(text.startswith("median · range") for text in all_text)
+
+    core_map = next(
+        axis
+        for axis in figure.axes
+        if axis.get_title(loc="left") == "Donor–core tissue map"
+    )
+    core_tile_labels = {text.get_text() for text in core_map.texts}
+    assert {"A", "B", "V", "None"}.issubset(core_tile_labels)
+    assert output_path.exists()
+    assert output_path.stat().st_size > 1_000
+    plt.close(figure)
+
+
+def test_plot_metadata_summary_warns_and_returns_donor_inconsistency():
+    """Inconsistent donor metadata must be auditable outside Jupyter."""
+    metadata = pd.DataFrame(
+        {
+            "donor_id": ["D1", "D1", "D2"],
+            "core_id": ["D1.c1", "D1.c2", "D2.c1"],
+            "tma_id": ["TMA1", "TMA1", "TMA2"],
+            "age": [50, 55, 60],
+            "pmi": [8, 8, 10],
+            "sex": ["F", "F", "M"],
+            "tissue_annotation": ["A", "B", "V"],
+        }
+    )
+
+    with pytest.warns(RuntimeWarning, match="Inconsistent donor-level metadata"):
+        output = pipeline.plot_metadata_summary(metadata)
+
+    assert output["donor_inconsistency"].loc["D1", "age"]
+    plt.close(output["fig"])
+
+
 def test_plot_macrophage_pct_uses_paired_donor_summaries_and_fdr():
     """Treating multiple cores as independent abundance replicates must fail."""
     abundance = pd.DataFrame(
