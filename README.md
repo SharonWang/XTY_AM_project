@@ -151,6 +151,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 | `run_stage3_all_methods` | Reusable library function; not called directly by the current notebooks |
 | `run_stage3_multicore` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb`<br>`07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
 | `save_figure` | Reusable library function; not called directly by the current notebooks |
+| `scanpy_de_to_seurat` | Reusable library function; not called directly by the current notebooks |
 | `score_and_assign_two_signatures` | `02_MA_Refinement.ipynb`<br>`03_1_AT2_Vim_Scoring.ipynb` |
 | `select_representative_cores` | Reusable library function; not called directly by the current notebooks |
 | `select_supportive_cores` | `08_Spatial_Umap.ipynb` |
@@ -182,6 +183,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 | `summarize_markers` | Calculates core- and donor-level expression/detection summaries and an equal-weight donor summary for dotplots. |
 | `cluster_expression_summary` | Returns mean expression, percentage detected, and cell count for each requested gene and group from `X` or a named layer. |
 | `gene_detection_by_group` | Calculates raw-count gene-detection percentages by a metadata group. |
+| `scanpy_de_to_seurat` | Converts stored Scanpy `rank_genes_groups` results into a Seurat-like marker table, adding within-group and outside-group detection fractions from `X`, `raw`, or a named layer and optionally exporting CSV. |
 | `compute_program_scores` | Standardizes measured genes within a candidate population and averages them into exploratory evidence programs with core/donor summaries. |
 
 ### Mouse-to-human mapping and MHCII annotation

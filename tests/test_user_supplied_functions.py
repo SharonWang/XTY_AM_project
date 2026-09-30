@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import anndata as ad
 import matplotlib
 
@@ -100,6 +102,99 @@ def test_gene_detection_by_group_uses_raw_and_rejects_no_panel_overlap():
             adata,
             genes=["absent"],
             groupby="cluster",
+        )
+
+
+def test_scanpy_de_to_seurat_reports_detection_and_exports_csv(
+    monkeypatch,
+    tmp_path,
+):
+    """Wrong Seurat columns, detection fractions, or export must fail."""
+    adata = ad.AnnData(
+        X=sparse.csr_matrix(
+            [
+                [3.0, 0.0],
+                [2.0, 1.0],
+                [1.0, 0.0],
+                [0.0, 2.0],
+                [0.0, 3.0],
+                [1.0, 2.0],
+            ]
+        ),
+        obs=pd.DataFrame(
+            {"cluster": ["A", "A", "A", "B", "B", "B"]},
+            index=[f"c{i}" for i in range(6)],
+        ),
+        var=pd.DataFrame(index=["G1", "G2"]),
+    )
+    rank_result = pd.DataFrame(
+        {
+            "group": ["A", "A", "B", "B"],
+            "names": ["G1", "G2", "G2", "G1"],
+            "scores": [2.0, -2.0, 2.0, -2.0],
+            "logfoldchanges": [2.5, -2.5, 2.5, -2.5],
+            "pvals": [0.01, 0.03, 0.01, 0.03],
+            "pvals_adj": [0.02, 0.04, 0.02, 0.04],
+        }
+    )
+    fake_scanpy = SimpleNamespace(
+        get=SimpleNamespace(
+            rank_genes_groups_df=lambda *args, **kwargs: rank_result.copy()
+        )
+    )
+    monkeypatch.setattr(pipeline, "sc", fake_scanpy, raising=False)
+    output_file = tmp_path / "markers.csv"
+
+    result = pipeline.scanpy_de_to_seurat(
+        adata,
+        groupby="cluster",
+        key="de_test",
+        output_file=output_file,
+    )
+
+    assert result.columns.tolist() == [
+        "gene", "cluster", "avg_log2FC", "pct.1", "pct.2",
+        "p_val", "p_val_adj", "score",
+    ]
+    a_g1 = result.query("cluster == 'A' and gene == 'G1'").iloc[0]
+    b_g2 = result.query("cluster == 'B' and gene == 'G2'").iloc[0]
+    assert a_g1["pct.1"] == pytest.approx(1.0)
+    assert a_g1["pct.2"] == pytest.approx(1.0 / 3.0)
+    assert b_g2["pct.1"] == pytest.approx(1.0)
+    assert b_g2["pct.2"] == pytest.approx(1.0 / 3.0)
+    pd.testing.assert_frame_equal(pd.read_csv(output_file), result)
+
+
+def test_scanpy_de_to_seurat_validates_expression_source():
+    """Missing grouping metadata, raw data, or layers must fail explicitly."""
+    adata = ad.AnnData(
+        X=np.ones((2, 1), dtype=float),
+        obs=pd.DataFrame(
+            {"cluster": ["A", "B"]},
+            index=["c1", "c2"],
+        ),
+        var=pd.DataFrame(index=["G1"]),
+    )
+
+    with pytest.raises(KeyError, match="missing_group"):
+        pipeline.scanpy_de_to_seurat(
+            adata,
+            groupby="missing_group",
+            key="de_test",
+        )
+    with pytest.raises(ValueError, match="adata.raw is missing"):
+        pipeline.scanpy_de_to_seurat(
+            adata,
+            groupby="cluster",
+            key="de_test",
+            use_raw=True,
+        )
+    with pytest.raises(KeyError, match="missing_layer"):
+        pipeline.scanpy_de_to_seurat(
+            adata,
+            groupby="cluster",
+            key="de_test",
+            layer="missing_layer",
         )
 
 

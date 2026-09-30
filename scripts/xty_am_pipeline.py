@@ -46,6 +46,11 @@ if TYPE_CHECKING:
     from anndata import AnnData
 
 try:
+    import scanpy as sc
+except ImportError:
+    sc = None
+
+try:
     import squidpy as sq
 except ImportError:
     class _MissingSquidpy:
@@ -2538,6 +2543,187 @@ def gene_detection_by_group(
             "gene": present,
         }))
     return pd.concat(records, ignore_index=True)
+
+
+def scanpy_de_to_seurat(
+    adata: Any,
+    groupby: str,
+    key: str,
+    output_file: str | Path | None = None,
+    layer: str | None = None,
+    use_raw: bool = False,
+) -> pd.DataFrame:
+    """Convert Scanpy differential-expression results to a Seurat-like table.
+
+    The function retrieves all groups stored by
+    :func:`scanpy.tl.rank_genes_groups`, adds the fraction of cells detecting
+    each gene inside and outside its focal group, and renames the result fields
+    to resemble the output of Seurat ``FindAllMarkers``. Detection fractions
+    range from 0 to 1, matching Seurat's ``pct.1`` and ``pct.2`` convention.
+
+    The caller must select the same expression source used when running
+    ``rank_genes_groups``. For example, set ``use_raw=True`` when the DE test
+    used ``adata.raw``, or pass the same named ``layer`` used for DE.
+
+    Parameters
+    ----------
+    adata
+        AnnData object containing the stored Scanpy DE result and the cell-by-
+        gene expression matrix used to calculate detection fractions.
+    groupby
+        Column in ``adata.obs`` containing the cluster or state labels used for
+        the differential-expression comparison.
+    key
+        Key in ``adata.uns`` created by ``scanpy.tl.rank_genes_groups``.
+    output_file
+        Optional CSV destination. When omitted, no file is written.
+    layer
+        Optional ``adata.layers`` key used to calculate detection fractions.
+        Ignored when ``use_raw=True``.
+    use_raw
+        Use ``adata.raw.X`` and ``adata.raw.var_names`` for detection fractions.
+        Raises an error when ``adata.raw`` is unavailable.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Seurat-like long table containing ``gene``, ``cluster``,
+        ``avg_log2FC``, ``pct.1``, ``pct.2``, ``p_val``, ``p_val_adj``, and
+        ``score`` when all corresponding Scanpy fields are available.
+
+    Raises
+    ------
+    KeyError
+        If ``groupby`` or the requested expression layer is absent.
+    ValueError
+        If ``use_raw=True`` but ``adata.raw`` is unavailable, a DE group has no
+        matching cells or no reference cells, or the selected matrix and gene
+        names are inconsistent.
+    ImportError
+        If Scanpy is not installed in the active environment.
+
+    Notes
+    -----
+    Detection is defined as expression greater than zero. Use a nonnegative,
+    unscaled expression representation for biologically interpretable
+    ``pct.1`` and ``pct.2`` values; centred or residualized matrices can make
+    this threshold inappropriate.
+    """
+    if groupby not in adata.obs.columns:
+        raise KeyError(f"{groupby!r} is not present in adata.obs.")
+
+    if use_raw:
+        if adata.raw is None:
+            raise ValueError("adata.raw is missing.")
+        matrix = adata.raw.X
+        var_names = pd.Index(adata.raw.var_names)
+    elif layer is not None:
+        if layer not in adata.layers:
+            raise KeyError(f"Layer {layer!r} is missing.")
+        matrix = adata.layers[layer]
+        var_names = pd.Index(adata.var_names)
+    else:
+        matrix = adata.X
+        var_names = pd.Index(adata.var_names)
+
+    if matrix.shape[0] != adata.n_obs or matrix.shape[1] != len(var_names):
+        raise ValueError(
+            "The selected expression matrix does not match the AnnData cells "
+            "and selected gene names."
+        )
+    if not var_names.is_unique:
+        raise ValueError("The selected expression source has duplicate gene names.")
+    if sc is None:
+        raise ImportError(
+            "scanpy_de_to_seurat requires Scanpy. Install Scanpy in the "
+            "analysis environment before calling this function."
+        )
+
+    result = sc.get.rank_genes_groups_df(
+        adata,
+        group=None,
+        key=key,
+    ).copy()
+    required_columns = {"group", "names"}
+    missing_columns = sorted(required_columns.difference(result.columns))
+    if missing_columns:
+        raise ValueError(
+            "Scanpy differential-expression results are missing columns: "
+            f"{missing_columns}."
+        )
+
+    group_values = adata.obs[groupby].astype(str)
+    groups = result["group"].astype(str).unique()
+    percentage_tables: list[pd.DataFrame] = []
+
+    for group in groups:
+        in_group = group_values.eq(group).to_numpy()
+        out_group = ~in_group
+        if in_group.sum() == 0 or out_group.sum() == 0:
+            raise ValueError(
+                f"DE group {group!r} requires at least one focal cell and "
+                "one reference cell."
+            )
+
+        if sparse.issparse(matrix):
+            pct_1 = np.asarray((matrix[in_group] > 0).mean(axis=0)).ravel()
+            pct_2 = np.asarray((matrix[out_group] > 0).mean(axis=0)).ravel()
+        else:
+            dense = np.asarray(matrix)
+            pct_1 = np.mean(dense[in_group] > 0, axis=0)
+            pct_2 = np.mean(dense[out_group] > 0, axis=0)
+
+        percentage_tables.append(pd.DataFrame({
+            "group": group,
+            "names": var_names,
+            "pct.1": pct_1,
+            "pct.2": pct_2,
+        }))
+
+    if not percentage_tables:
+        raise ValueError("No differential-expression groups were found.")
+    percentages = pd.concat(percentage_tables, ignore_index=True)
+    result["group"] = result["group"].astype(str)
+    result = result.merge(
+        percentages,
+        on=["group", "names"],
+        how="left",
+        validate="one_to_one",
+    )
+    result = result.rename(columns={
+        "names": "gene",
+        "group": "cluster",
+        "logfoldchanges": "avg_log2FC",
+        "pvals": "p_val",
+        "pvals_adj": "p_val_adj",
+        "scores": "score",
+    })
+    column_order = [
+        "gene", "cluster", "avg_log2FC", "pct.1", "pct.2",
+        "p_val", "p_val_adj", "score",
+    ]
+    result = result[
+        [column for column in column_order if column in result.columns]
+    ]
+    sort_columns = [
+        column for column in ["cluster", "p_val_adj", "avg_log2FC"]
+        if column in result.columns
+    ]
+    ascending = {
+        "cluster": True,
+        "p_val_adj": True,
+        "avg_log2FC": False,
+    }
+    if sort_columns:
+        result = result.sort_values(
+            sort_columns,
+            ascending=[ascending[column] for column in sort_columns],
+        )
+    result = result.reset_index(drop=True)
+
+    if output_file is not None:
+        result.to_csv(Path(output_file), index=False)
+    return result
 
 
 def assign_mhcii_single_signature(
@@ -17231,7 +17417,8 @@ __all__ = [
     "plot_program_umap", "plot_radius_core_correlations",
     "plot_spatial_celltypes",
     "plot_spatial_focus", "plot_spatial_programs", "radius_weighted_mean",
-    "save_figure", "score_and_assign_two_signatures",
+    "save_figure", "scanpy_de_to_seurat",
+    "score_and_assign_two_signatures",
     "export_spatial_cellchat_inputs",
     "select_representative_cores", "select_supportive_cores",
     "summarize_markers", "rank_stage2_core_contributions",
