@@ -28,6 +28,7 @@ from matplotlib.colors import (
     ListedColormap,
     Normalize,
     TwoSlopeNorm,
+    to_rgba,
 )
 from matplotlib.figure import Figure
 from matplotlib.lines import Line2D
@@ -3138,6 +3139,516 @@ def plot_macrophage_pct_by_tissue(
     if save is not None:
         figure.savefig(save, dpi=dpi, bbox_inches="tight", transparent=True)
     return figure, axes_array, donor_summary, statistics
+
+
+def _gene_umap_as_1d(array):
+    """Convert one dense or sparse expression column to a flat array."""
+    if sparse.issparse(array):
+        return np.asarray(array.toarray()).ravel()
+    return np.asarray(array).ravel()
+
+
+def _gene_umap_limit(value, gene, gene_index):
+    """Resolve a scalar, ordered sequence, or gene-keyed plotting limit."""
+    if value is None:
+        return None
+    if isinstance(value, Mapping):
+        return value.get(gene)
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        return value[gene_index]
+    return value
+
+
+def plot_anndata_gene_umap(
+    adata,
+    genes,
+    use_raw: bool = False,
+    layer: str | None = None,
+    umap_key: str = "X_umap",
+    cmap="magma",
+    point_size: float = 1,
+    point_alpha: float = 0.5,
+    na_color="#D3D3D3",
+    expression_cutoff: float = 0.0,
+    show_below_cutoff_as_grey: bool = True,
+    color_quantiles: tuple[float, float] = (0.01, 0.99),
+    vmin=None,
+    vmax=None,
+    shared_color_scale: bool = False,
+    sort_expression: bool = True,
+    width_cm: float = 4,
+    height_cm: float = 4,
+    left_cm: float = 1.20,
+    right_cm: float = 0.25,
+    bottom_cm: float = 1.05,
+    top_cm: float = 0.90,
+    panel_gap_cm: float = 0.50,
+    show_legend: bool = False,
+    legend_title: str | None = None,
+    legend_fontsize: float = 8,
+    legend_title_size: float = 9,
+    legend_gap_cm: float = 0.35,
+    legend_width_cm: float = 4.0,
+    legend_ncol: int = 1,
+    title: str | None = None,
+    title_map: Mapping | None = None,
+    xlabel: str = "UMAP1",
+    ylabel: str = "UMAP2",
+    axis_label_size: float = 10,
+    title_size: float = 11,
+    gene_title_size: float = 10,
+    tick_label_size: float = 8,
+    spine_width: float = 1.0,
+    tick_width: float = 1.0,
+    tick_length: float = 3,
+    tick_nbins: int = 4,
+    padding_fraction: float = 0.03,
+    shared_limits: bool = True,
+    rasterized: bool = True,
+    transparent: bool = True,
+    save: str | Path | None = None,
+    dpi: float = 600,
+    show: bool = False,
+    output_file: str | Path | None = None,
+) -> tuple[Figure, np.ndarray, pd.DataFrame]:
+    """Plot continuous gene expression in horizontal AnnData UMAP panels.
+
+    Each gene occupies one panel. Cells at or below ``expression_cutoff`` are
+    grey by default, while cells above the cutoff use a continuous colormap.
+    The function reads only the requested gene columns and supports dense or
+    sparse ``X``/layer matrices and ``adata.raw``.
+
+    Parameters
+    ----------
+    adata
+        AnnData-like object containing expression, observation identifiers,
+        variable names, and UMAP coordinates.
+    genes
+        Gene name or ordered gene-name sequence. Duplicate requests are removed
+        while retaining their first occurrence.
+    use_raw
+        Read expression and variable names from ``adata.raw`` when ``True``.
+    layer
+        Optional layer used instead of ``adata.X``. It cannot be combined with
+        ``use_raw=True``.
+    umap_key
+        Key in ``adata.obsm`` containing at least two UMAP dimensions.
+    cmap, point_size, point_alpha, na_color
+        Continuous colormap and cell-marker appearance.
+    expression_cutoff
+        Cells with expression strictly above this scale-dependent threshold are
+        counted as expressing and colored when grey-background mode is enabled.
+    show_below_cutoff_as_grey
+        Display below-cutoff and non-finite expression in ``na_color`` when
+        ``True``; otherwise color all finite expression values.
+    color_quantiles
+        Lower and upper quantiles used to calculate automatic color limits.
+    vmin, vmax
+        Optional scalar, ordered per-gene sequence, or gene-keyed mapping of
+        explicit color limits. Only scalar limits are valid with a shared color
+        scale because one shared colorbar must represent every panel.
+    shared_color_scale
+        Use one pooled expression normalization and, when requested, one shared
+        colorbar across genes.
+    sort_expression
+        Draw higher-expression cells last so they remain visible.
+    width_cm, height_cm, left_cm, right_cm, bottom_cm, top_cm, panel_gap_cm
+        Exact physical panel dimensions and margins in centimetres.
+    show_legend, legend_title, legend_fontsize, legend_title_size
+        Continuous-colorbar display and typography settings.
+    legend_gap_cm, legend_width_cm, legend_ncol
+        Reserved colorbar region and layout for gene-specific colorbars.
+    title, title_map
+        Optional overall title and optional gene-to-panel-title mapping.
+    xlabel, ylabel, axis_label_size, title_size, gene_title_size
+        Axis and title text settings.
+    tick_label_size, spine_width, tick_width, tick_length, tick_nbins
+        Axis styling settings.
+    padding_fraction
+        Nonnegative fraction of the UMAP coordinate range added to axes.
+    shared_limits
+        Use global UMAP limits across all panels when ``True``.
+    rasterized
+        Rasterize cell points while retaining vector text and axes.
+    transparent
+        Save figures with transparent background.
+    save, output_file
+        Alternative optional output paths; provide no more than one.
+    dpi
+        Positive output resolution used when saving.
+    show
+        Display the figure interactively when ``True``.
+
+    Returns
+    -------
+    fig : matplotlib.figure.Figure
+        Newly created UMAP figure.
+    axes : numpy.ndarray
+        One-dimensional object array of gene-panel axes.
+    metadata : pandas.DataFrame
+        Per-gene expression source, valid/expressing cell counts, detection
+        fraction, cutoff, and applied color limits.
+
+    Raises
+    ------
+    KeyError
+        If the UMAP, requested layer, or any requested gene is absent.
+    ValueError
+        If expression-source choices, dimensions, limits, quantiles, coordinates,
+        or plotting parameters are invalid.
+
+    Notes
+    -----
+    UMAP is an expression-derived visualization and does not establish physical
+    proximity. Detection fractions and cutoffs are meaningful only relative to
+    the declared expression source and its normalization scale.
+    """
+    if output_file is not None:
+        if save is not None:
+            raise ValueError("Use only one of save or output_file.")
+        save = output_file
+    if isinstance(genes, str):
+        genes = [genes]
+    else:
+        genes = list(genes)
+    try:
+        genes = list(dict.fromkeys(genes))
+    except TypeError as error:
+        raise ValueError("genes must contain hashable gene names.") from error
+    if not genes:
+        raise ValueError("Provide at least one gene.")
+    if use_raw and layer is not None:
+        raise ValueError("use_raw=True and layer cannot be used together.")
+    if umap_key not in adata.obsm:
+        raise KeyError(f"{umap_key!r} was not found in adata.obsm.")
+
+    def positive_finite(value, name, *, allow_zero=False):
+        if (
+            isinstance(value, bool)
+            or not np.isscalar(value)
+            or not np.isfinite(value)
+            or (value < 0 if allow_zero else value <= 0)
+        ):
+            relation = "nonnegative" if allow_zero else "positive"
+            raise ValueError(f"{name} must be a finite {relation} number.")
+
+    positive_finite(point_size, "point_size")
+    if not np.isscalar(point_alpha) or not np.isfinite(point_alpha) or not 0 <= point_alpha <= 1:
+        raise ValueError("point_alpha must be finite and between 0 and 1.")
+    if not np.isscalar(expression_cutoff) or not np.isfinite(expression_cutoff):
+        raise ValueError("expression_cutoff must be finite.")
+    for value, name, allow_zero in (
+        (width_cm, "width_cm", False),
+        (height_cm, "height_cm", False),
+        (left_cm, "left_cm", True),
+        (right_cm, "right_cm", True),
+        (bottom_cm, "bottom_cm", True),
+        (top_cm, "top_cm", True),
+        (panel_gap_cm, "panel_gap_cm", True),
+        (legend_gap_cm, "legend_gap_cm", True),
+        (legend_width_cm, "legend_width_cm", True),
+    ):
+        positive_finite(value, name, allow_zero=allow_zero)
+    positive_finite(padding_fraction, "padding_fraction", allow_zero=True)
+    positive_finite(dpi, "dpi")
+    if isinstance(legend_ncol, bool) or not isinstance(legend_ncol, Integral) or legend_ncol < 1:
+        raise ValueError("legend_ncol must be a positive integer.")
+    if isinstance(tick_nbins, bool) or not isinstance(tick_nbins, Integral) or tick_nbins < 1:
+        raise ValueError("tick_nbins must be a positive integer.")
+    try:
+        quantiles = tuple(float(value) for value in color_quantiles)
+    except (TypeError, ValueError) as error:
+        raise ValueError("color_quantiles must contain two finite numbers.") from error
+    if (
+        len(quantiles) != 2
+        or not np.isfinite(quantiles).all()
+        or not 0 <= quantiles[0] < quantiles[1] <= 1
+    ):
+        raise ValueError("color_quantiles must satisfy 0 <= low < high <= 1.")
+
+    def validate_limit_specification(value, name):
+        if isinstance(value, Mapping):
+            return
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+            if len(value) != len(genes):
+                raise ValueError(f"{name} must provide one value per gene.")
+
+    validate_limit_specification(vmin, "vmin")
+    validate_limit_specification(vmax, "vmax")
+    if shared_color_scale:
+        for value, name in ((vmin, "vmin"), (vmax, "vmax")):
+            if isinstance(value, Mapping) or (
+                isinstance(value, Sequence) and not isinstance(value, (str, bytes))
+            ):
+                raise ValueError(
+                    f"{name} must be scalar when shared_color_scale=True."
+                )
+
+    umap_xy = np.asarray(adata.obsm[umap_key], dtype=float)
+    if umap_xy.ndim != 2 or umap_xy.shape[1] < 2:
+        raise ValueError(
+            f"adata.obsm[{umap_key!r}] must contain at least two columns."
+        )
+    n_obs = len(adata.obs_names)
+    if umap_xy.shape[0] != n_obs:
+        raise ValueError(
+            f"adata.obsm[{umap_key!r}] has {umap_xy.shape[0]} rows, "
+            f"but adata has {n_obs} cells."
+        )
+    umap_xy = umap_xy[:, :2]
+    finite_xy = np.isfinite(umap_xy).all(axis=1)
+    if not finite_xy.any():
+        raise ValueError("The UMAP contains no finite coordinates.")
+
+    if use_raw:
+        if getattr(adata, "raw", None) is None:
+            raise ValueError("use_raw=True, but adata.raw is missing.")
+        source = adata.raw
+        available_genes = pd.Index(source.var_names)
+        source_label = "raw"
+    else:
+        source = adata
+        available_genes = pd.Index(adata.var_names)
+        if layer is not None and layer not in adata.layers:
+            raise KeyError(
+                f"Layer {layer!r} is missing. Available layers: "
+                f"{list(adata.layers.keys())}"
+            )
+        source_label = f"layer:{layer}" if layer is not None else "X"
+    if available_genes.has_duplicates:
+        raise ValueError(f"Gene names in {source_label} must be unique.")
+    missing_genes = [gene for gene in genes if gene not in available_genes]
+    if missing_genes:
+        raise KeyError(f"Genes not found in {source_label}: {missing_genes}")
+
+    expression = {}
+    for gene in genes:
+        subset = source[:, gene]
+        values = subset.layers[layer] if layer is not None else subset.X
+        values = _gene_umap_as_1d(values).astype(float, copy=False)
+        if values.size != n_obs:
+            raise ValueError(f"Expression length does not match cells for {gene!r}.")
+        expression[gene] = values
+
+    x_all = umap_xy[finite_xy, 0]
+    y_all = umap_xy[finite_xy, 1]
+    x_range, y_range = np.ptp(x_all), np.ptp(y_all)
+    x_pad = padding_fraction * x_range if x_range > 0 else 1
+    y_pad = padding_fraction * y_range if y_range > 0 else 1
+    global_xlim = (np.nanmin(x_all) - x_pad, np.nanmax(x_all) + x_pad)
+    global_ylim = (np.nanmin(y_all) - y_pad, np.nanmax(y_all) + y_pad)
+
+    shared_color_limits = None
+    if shared_color_scale:
+        pooled_values = np.concatenate(
+            [
+                values[finite_xy & np.isfinite(values)]
+                for values in expression.values()
+            ]
+        )
+        if show_below_cutoff_as_grey:
+            pooled_values = pooled_values[pooled_values > expression_cutoff]
+        shared_color_limits = (
+            tuple(np.quantile(pooled_values, quantiles))
+            if pooled_values.size
+            else (0.0, 1.0)
+        )
+        if vmin is not None:
+            shared_color_limits = (float(vmin), shared_color_limits[1])
+        if vmax is not None:
+            shared_color_limits = (shared_color_limits[0], float(vmax))
+
+    n_panels = len(genes)
+    plot_area_width_cm = n_panels * width_cm + (n_panels - 1) * panel_gap_cm
+    legend_extra_cm = legend_gap_cm + legend_width_cm if show_legend else 0
+    figure_width_cm = left_cm + plot_area_width_cm + right_cm + legend_extra_cm
+    figure_height_cm = bottom_cm + height_cm + top_cm
+    cm_to_inch = 1 / 2.54
+    fig = plt.figure(
+        figsize=(figure_width_cm * cm_to_inch, figure_height_cm * cm_to_inch)
+    )
+    axes, metadata_rows, colorbar_specs = [], [], []
+    title_map = {} if title_map is None else title_map
+    cmap_object = plt.get_cmap(cmap) if isinstance(cmap, str) else cmap
+
+    for gene_index, gene in enumerate(genes):
+        panel_left_cm = left_cm + gene_index * (width_cm + panel_gap_cm)
+        ax = fig.add_axes(
+            [
+                panel_left_cm / figure_width_cm,
+                bottom_cm / figure_height_cm,
+                width_cm / figure_width_cm,
+                height_cm / figure_height_cm,
+            ]
+        )
+        axes.append(ax)
+        values = expression[gene]
+        finite_expression = np.isfinite(values)
+        valid = finite_xy & finite_expression
+        expressing = valid & (values > expression_cutoff)
+        colored = expressing if show_below_cutoff_as_grey else valid
+
+        if shared_color_limits is not None:
+            gene_vmin, gene_vmax = shared_color_limits
+        elif colored.any():
+            gene_vmin, gene_vmax = np.quantile(values[colored], quantiles)
+        else:
+            gene_vmin, gene_vmax = 0.0, 1.0
+        explicit_vmin = _gene_umap_limit(vmin, gene, gene_index)
+        explicit_vmax = _gene_umap_limit(vmax, gene, gene_index)
+        if explicit_vmin is not None:
+            gene_vmin = explicit_vmin
+        if explicit_vmax is not None:
+            gene_vmax = explicit_vmax
+        gene_vmin, gene_vmax = float(gene_vmin), float(gene_vmax)
+        if not np.isfinite(gene_vmin) or not np.isfinite(gene_vmax):
+            raise ValueError(f"Non-finite color limits for {gene!r}.")
+        if gene_vmax <= gene_vmin:
+            gene_vmax = gene_vmin + max(abs(gene_vmin) * 1e-9, 1e-9)
+        norm = Normalize(vmin=gene_vmin, vmax=gene_vmax, clip=True)
+
+        plotted_indices = np.flatnonzero(finite_xy)
+        colors = np.tile(to_rgba(na_color), (plotted_indices.size, 1))
+        local_colored = colored[plotted_indices]
+        local_values = values[plotted_indices]
+        colors[local_colored] = cmap_object(norm(local_values[local_colored]))
+        if sort_expression:
+            order_values = np.full(plotted_indices.size, -np.inf)
+            order_values[local_colored] = local_values[local_colored]
+            order = np.argsort(order_values, kind="stable")
+        else:
+            order = np.arange(plotted_indices.size)
+        points = ax.scatter(
+            umap_xy[plotted_indices[order], 0],
+            umap_xy[plotted_indices[order], 1],
+            s=point_size,
+            c=colors[order],
+            alpha=point_alpha,
+            linewidths=0,
+            edgecolors="none",
+            rasterized=rasterized,
+            zorder=2,
+        )
+        safe_gene = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(gene))
+        points.set_gid(f"umap_dots_{safe_gene}")
+
+        if shared_limits:
+            ax.set_xlim(global_xlim)
+            ax.set_ylim(global_ylim)
+        else:
+            local_x, local_y = umap_xy[plotted_indices, 0], umap_xy[plotted_indices, 1]
+            local_x_range, local_y_range = np.ptp(local_x), np.ptp(local_y)
+            local_x_pad = padding_fraction * local_x_range if local_x_range > 0 else 1
+            local_y_pad = padding_fraction * local_y_range if local_y_range > 0 else 1
+            ax.set_xlim(np.nanmin(local_x) - local_x_pad, np.nanmax(local_x) + local_x_pad)
+            ax.set_ylim(np.nanmin(local_y) - local_y_pad, np.nanmax(local_y) + local_y_pad)
+        ax.set_box_aspect(height_cm / width_cm)
+        ax.xaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+        ax.yaxis.set_major_locator(MaxNLocator(nbins=tick_nbins, integer=True))
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.spines["left"].set_linewidth(spine_width)
+        ax.spines["bottom"].set_linewidth(spine_width)
+        ax.tick_params(
+            axis="both", which="major", labelsize=tick_label_size,
+            width=tick_width, length=tick_length, direction="out",
+        )
+        ax.grid(False)
+        ax.set_xlabel(xlabel, fontsize=axis_label_size)
+        if gene_index == 0:
+            ax.set_ylabel(ylabel, fontsize=axis_label_size)
+        else:
+            ax.set_ylabel("")
+            ax.spines["left"].set_visible(False)
+            ax.tick_params(axis="y", which="both", left=False, labelleft=False)
+        ax.set_title(
+            str(title_map.get(gene, gene)), fontsize=gene_title_size,
+            fontweight="normal", pad=7,
+        )
+        n_valid, n_expressing = int(valid.sum()), int(expressing.sum())
+        metadata_rows.append(
+            {
+                "gene": gene,
+                "expression_source": source_label,
+                "n_cells": n_valid,
+                "n_expressing": n_expressing,
+                "fraction_expressing": n_expressing / n_valid if n_valid else np.nan,
+                "expression_cutoff": expression_cutoff,
+                "vmin": gene_vmin,
+                "vmax": gene_vmax,
+            }
+        )
+        colorbar_specs.append((gene, norm))
+
+    axes_array = np.asarray(axes, dtype=object)
+    if title is not None:
+        plot_center_cm = left_cm + plot_area_width_cm / 2
+        title_y_cm = bottom_cm + height_cm + top_cm * 0.82
+        fig.text(
+            plot_center_cm / figure_width_cm,
+            title_y_cm / figure_height_cm,
+            title,
+            ha="center", va="center", fontsize=title_size,
+        )
+
+    if show_legend:
+        legend_title = "Expression" if legend_title is None else legend_title
+        legend_left_cm = left_cm + plot_area_width_cm + right_cm + legend_gap_cm
+        if shared_color_scale or len(genes) == 1:
+            colorbar_width_cm = min(0.35, legend_width_cm * 0.18)
+            colorbar_height_cm = min(height_cm * 0.72, 3.0)
+            colorbar_ax = fig.add_axes(
+                [
+                    legend_left_cm / figure_width_cm,
+                    (bottom_cm + (height_cm - colorbar_height_cm) / 2) / figure_height_cm,
+                    colorbar_width_cm / figure_width_cm,
+                    colorbar_height_cm / figure_height_cm,
+                ]
+            )
+            colorbar = fig.colorbar(
+                ScalarMappable(norm=colorbar_specs[0][1], cmap=cmap_object),
+                cax=colorbar_ax, orientation="vertical",
+            )
+            colorbar.set_label(legend_title, fontsize=legend_title_size, labelpad=7)
+            colorbar.ax.tick_params(labelsize=legend_fontsize, width=0.7, length=3)
+            colorbar.outline.set_linewidth(0.7)
+        else:
+            n_columns = min(legend_ncol, len(genes))
+            n_rows = int(np.ceil(len(genes) / n_columns))
+            cell_width_cm = legend_width_cm / n_columns
+            cell_height_cm = height_cm / n_rows
+            for colorbar_index, (gene, norm) in enumerate(colorbar_specs):
+                column, row = colorbar_index % n_columns, colorbar_index // n_columns
+                bar_width_cm = min(0.28, cell_width_cm * 0.18)
+                bar_height_cm = min(cell_height_cm * 0.58, 2.0)
+                bar_left_cm = legend_left_cm + column * cell_width_cm
+                bar_bottom_cm = (
+                    bottom_cm + height_cm - (row + 1) * cell_height_cm
+                    + (cell_height_cm - bar_height_cm) / 2
+                )
+                colorbar_ax = fig.add_axes(
+                    [
+                        bar_left_cm / figure_width_cm,
+                        bar_bottom_cm / figure_height_cm,
+                        bar_width_cm / figure_width_cm,
+                        bar_height_cm / figure_height_cm,
+                    ]
+                )
+                colorbar = fig.colorbar(
+                    ScalarMappable(norm=norm, cmap=cmap_object),
+                    cax=colorbar_ax, orientation="vertical",
+                )
+                colorbar.ax.set_title(str(gene), fontsize=legend_fontsize, pad=3)
+                colorbar.ax.tick_params(labelsize=legend_fontsize, width=0.7, length=2)
+                colorbar.outline.set_linewidth(0.7)
+
+    if save is not None:
+        save_path = Path(save)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=dpi, transparent=transparent)
+    if show:
+        plt.show()
+    return fig, axes_array, pd.DataFrame(metadata_rows)
 
 
 def plot_anndata_group_umap(
@@ -20370,7 +20881,8 @@ __all__ = [
     "configure_plot_style", "extract_marker_matrices",
     "gene_detection_by_group", "marker_availability_table",
     "merge_obs_to_main", "plot_am_at2_pct_by_donor",
-    "plot_am_at2_spatial", "plot_anndata_group_umap",
+    "plot_am_at2_spatial", "plot_anndata_gene_umap",
+    "plot_anndata_group_umap",
     "plot_focus_umap", "plot_full_umap",
     "plot_knn_niche_continuum",
     "plot_stage1A_niche_dotmap", "plot_stage1B_primary",

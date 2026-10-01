@@ -122,6 +122,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 | `merge_obs_to_main` | `04_Merge_Obs_To_Main.ipynb`<br>`07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb`<br>`07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb`<br>`08_Spatial_Umap.ipynb` |
 | `plot_am_at2_pct_by_donor` | `04_Merge_Obs_To_Main.ipynb` |
 | `plot_am_at2_spatial` | Reusable library function; not called directly by the current notebooks |
+| `plot_anndata_gene_umap` | Reusable expression companion for `02_1_AM_MHCII_Scoring.ipynb`, `02_MA_Refinement.ipynb`, and `03_1_AT2_Vim_Scoring.ipynb`; not called directly by the current notebooks |
 | `plot_anndata_group_umap` | `02_1_AM_MHCII_Scoring.ipynb`<br>`02_MA_Refinement.ipynb`<br>`03_1_AT2_Vim_Scoring.ipynb` |
 | `plot_core_contributions` | Reusable library function; not called directly by the current notebooks |
 | `plot_focus_umap` | Reusable library function; not called directly by the current notebooks |
@@ -250,6 +251,7 @@ inference uses one equal-core summary per donor.
 
 | Function | Role and output |
 |---|---|
+| `plot_anndata_gene_umap` | Draws one horizontal UMAP panel per gene from dense or sparse `X`, a declared layer, or `adata.raw`; reports expression-source and detection metadata; supports per-gene or shared color scales; and rejects inconsistent shared-colorbar limits. The expression cutoff is scale-specific, and UMAP placement is not physical spatial evidence. |
 | `plot_anndata_group_umap` | Reusable single-panel, split, or highlighted categorical UMAP with explicit palettes and vector labels. |
 | `score_and_assign_two_signatures` | Scores two gene sets and assigns the larger score, with optional low-score or small-margin ambiguity. Independently controlled Scanpy scores are heuristic and require marker/distribution review. |
 | `calculate_stage3_balanced_extremes_by_core` | Secondary tie-safe comparison of local AT2 VIM score around equal MHCII-score tails at fixed radii. |
