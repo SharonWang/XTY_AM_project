@@ -8711,6 +8711,264 @@ def calculate_stage2_nearest_mhcii_groups_worker(
     )
 
 
+def calculate_stage2_nearest_extremes_by_core(
+    adata,
+    donor_col="donor_id",
+    core_col="core_id",
+    tissue_col="tissue_annotation",
+    age_col="age",
+    celltype_col="CellType_refined",
+    score_col="MHCIIhi_score",
+    spatial_key="spatial",
+    am_labels=("AM", "Alveolar Macrophage"),
+    at2_labels=("AT2",),
+    extreme_fraction=0.25,
+    min_extreme_cells=5,
+    min_at2_cells=1,
+    distance_summary="median",
+    coordinate_scale=1.0,
+    n_permutations=1000,
+    random_state=None,
+    **kwargs,
+):
+    """Compare nearest-AT2 distance between AM MHCII-score extremes.
+
+    The function analyzes one spatial core and selects equally sized tails from
+    the ranked continuous MHCII score. Its effect is the low-tail distance
+    minus the high-tail distance; therefore, a positive effect means that
+    higher-scoring AMs are closer to AT2 cells. Score ties spanning either tail
+    boundary make the core ineligible because splitting tied cells would be
+    arbitrary. The within-core permutation P value is diagnostic only;
+    biological inference must use independent donors.
+
+    Parameters
+    ----------
+    adata
+        One-core AnnData-like object containing ``obs`` and ``obsm``.
+    donor_col, core_col, tissue_col, age_col
+        Observation columns identifying donor, core, tissue, and optional age.
+    celltype_col, score_col
+        Observation columns containing refined cell types and the continuous
+        AM MHCII-high program score.
+    spatial_key
+        Key in ``adata.obsm`` containing at least x and y coordinates.
+    am_labels, at2_labels
+        Cell-type labels treated as alveolar macrophages and AT2 cells.
+    extreme_fraction
+        Fraction selected independently from each score tail. It must be
+        greater than zero and no greater than 0.5.
+    min_extreme_cells, min_at2_cells
+        Minimum selected AMs per tail and minimum AT2 cells required.
+    distance_summary
+        ``"median"`` or ``"mean"`` nearest-AT2 distance per tail.
+    coordinate_scale
+        Positive multiplier converting stored coordinates to the desired
+        physical distance unit, normally micrometres for Xenium data.
+    n_permutations
+        Number of two-sided within-core distance permutations. Zero disables
+        the diagnostic test.
+    random_state
+        Seed controlling the permutation sequence.
+    **kwargs
+        Extra multicore-runner arguments accepted for compatibility and ignored.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One standardized core-level row, or an empty table with the same
+        columns when cell counts, score variation, or unambiguous tail
+        boundaries are insufficient.
+
+    Raises
+    ------
+    KeyError
+        If required metadata or spatial coordinates are absent.
+    TypeError
+        If integer parameters have invalid types.
+    ValueError
+        If parameter values, coordinates, or within-core metadata are invalid.
+    """
+    del kwargs
+    output_columns = [
+        "method", "scale", donor_col, core_col, tissue_col, age_col,
+        "effect", "effect_direction", "distance_difference_high_minus_low",
+        "mhcii_low_distance", "mhcii_high_distance", "mhcii_low_score",
+        "mhcii_high_score", "n_source", "n_target", "n_am", "n_at2",
+        "n_extreme_per_group", "extreme_fraction", "distance_summary",
+        "coordinate_scale", "permutation_p_value", "n_permutations",
+    ]
+
+    def empty_result():
+        return pd.DataFrame(columns=output_columns)
+
+    if (
+        isinstance(extreme_fraction, bool)
+        or not np.isscalar(extreme_fraction)
+        or not np.isfinite(extreme_fraction)
+        or not 0 < float(extreme_fraction) <= 0.5
+    ):
+        raise ValueError("extreme_fraction must satisfy 0 < fraction <= 0.5.")
+    for value, name in (
+        (min_extreme_cells, "min_extreme_cells"),
+        (min_at2_cells, "min_at2_cells"),
+    ):
+        if isinstance(value, bool) or not isinstance(value, Integral):
+            raise TypeError(f"{name} must be an integer.")
+        if value < 1:
+            raise ValueError(f"{name} must be at least one.")
+    if isinstance(n_permutations, bool) or not isinstance(
+        n_permutations, Integral
+    ):
+        raise TypeError("n_permutations must be a nonnegative integer.")
+    if n_permutations < 0:
+        raise ValueError("n_permutations must be a nonnegative integer.")
+    if distance_summary not in {"median", "mean"}:
+        raise ValueError("distance_summary must be 'median' or 'mean'.")
+    if (
+        isinstance(coordinate_scale, bool)
+        or not np.isscalar(coordinate_scale)
+        or not np.isfinite(coordinate_scale)
+        or float(coordinate_scale) <= 0
+    ):
+        raise ValueError("coordinate_scale must be a positive finite number.")
+
+    required = [donor_col, core_col, celltype_col, score_col]
+    missing = [column for column in required if column not in adata.obs.columns]
+    if missing:
+        raise KeyError(f"Missing adata.obs columns: {missing}")
+    if spatial_key not in adata.obsm:
+        raise KeyError(f"adata.obsm[{spatial_key!r}] is missing.")
+
+    obs = adata.obs
+    coordinates = np.asarray(adata.obsm[spatial_key], dtype=float)
+    if (
+        coordinates.ndim != 2
+        or coordinates.shape[0] != len(obs)
+        or coordinates.shape[1] < 2
+    ):
+        raise ValueError(
+            "Spatial coordinates must match adata.obs and contain x and y."
+        )
+    coordinates = coordinates[:, :2] * float(coordinate_scale)
+
+    def unique_value(column, label, *, required_value=False):
+        if column not in obs.columns:
+            return np.nan
+        values = obs[column].dropna().astype(str).unique()
+        if len(values) > 1:
+            raise ValueError(
+                f"Core contains multiple {label} values: {values[:10].tolist()}"
+            )
+        if required_value and len(values) == 0:
+            return None
+        return values[0] if len(values) else np.nan
+
+    core_id = unique_value(core_col, "core", required_value=True)
+    if core_id is None:
+        return empty_result()
+    donor_id = unique_value(donor_col, "donor")
+    tissue = unique_value(tissue_col, "tissue")
+    if age_col in obs.columns:
+        ages = pd.to_numeric(obs[age_col], errors="coerce").dropna().unique()
+        if len(ages) > 1:
+            raise ValueError(
+                f"Age is inconsistent within core {core_id!r}: {ages.tolist()}"
+            )
+        age = float(ages[0]) if len(ages) else np.nan
+    else:
+        age = np.nan
+
+    finite_coordinates = np.isfinite(coordinates).all(axis=1)
+    celltypes = obs[celltype_col].astype(str).to_numpy()
+    scores = pd.to_numeric(obs[score_col], errors="coerce").to_numpy(float)
+    is_am = (
+        np.isin(celltypes, list(am_labels))
+        & finite_coordinates
+        & np.isfinite(scores)
+    )
+    is_at2 = np.isin(celltypes, list(at2_labels)) & finite_coordinates
+    n_am = int(is_am.sum())
+    n_at2 = int(is_at2.sum())
+    if n_at2 < min_at2_cells:
+        return empty_result()
+
+    am_scores = scores[is_am]
+    n_extreme = min(
+        int(np.floor(len(am_scores) * float(extreme_fraction))),
+        len(am_scores) // 2,
+    )
+    if n_extreme < min_extreme_cells or len(am_scores) < 2:
+        return empty_result()
+    order = np.argsort(am_scores, kind="stable")
+    sorted_scores = am_scores[order]
+    low_tied = (
+        n_extreme < len(sorted_scores)
+        and sorted_scores[n_extreme - 1] == sorted_scores[n_extreme]
+    )
+    high_tied = (
+        n_extreme < len(sorted_scores)
+        and sorted_scores[-n_extreme] == sorted_scores[-n_extreme - 1]
+    )
+    if low_tied or high_tied:
+        return empty_result()
+
+    nearest, _ = cKDTree(coordinates[is_at2]).query(coordinates[is_am], k=1)
+    nearest = np.asarray(nearest, dtype=float)
+    if not np.isfinite(nearest).all():
+        return empty_result()
+    low_indices = order[:n_extreme]
+    high_indices = order[-n_extreme:]
+    summary_function = np.median if distance_summary == "median" else np.mean
+    low_distance = float(summary_function(nearest[low_indices]))
+    high_distance = float(summary_function(nearest[high_indices]))
+    effect = low_distance - high_distance
+
+    if n_permutations:
+        rng = np.random.default_rng(random_state)
+        null_effects = np.empty(n_permutations, dtype=float)
+        for permutation_index in range(n_permutations):
+            permuted = nearest[rng.permutation(len(nearest))]
+            null_effects[permutation_index] = float(
+                summary_function(permuted[low_indices])
+                - summary_function(permuted[high_indices])
+            )
+        permutation_p_value = float(
+            (1 + np.sum(np.abs(null_effects) >= abs(effect)))
+            / (n_permutations + 1)
+        )
+    else:
+        permutation_p_value = np.nan
+
+    result = pd.DataFrame(
+        {
+            "method": ["nearest_at2_score_extremes"],
+            "scale": ["nearest_AT2"],
+            donor_col: [donor_id],
+            core_col: [core_id],
+            tissue_col: [tissue],
+            age_col: [age],
+            "effect": [effect],
+            "effect_direction": ["positive = higher-MHCII AMs closer to AT2"],
+            "distance_difference_high_minus_low": [high_distance - low_distance],
+            "mhcii_low_distance": [low_distance],
+            "mhcii_high_distance": [high_distance],
+            "mhcii_low_score": [float(np.median(am_scores[low_indices]))],
+            "mhcii_high_score": [float(np.median(am_scores[high_indices]))],
+            "n_source": [n_am],
+            "n_target": [n_at2],
+            "n_am": [n_am],
+            "n_at2": [n_at2],
+            "n_extreme_per_group": [n_extreme],
+            "extreme_fraction": [float(extreme_fraction)],
+            "distance_summary": [distance_summary],
+            "coordinate_scale": [float(coordinate_scale)],
+            "permutation_p_value": [permutation_p_value],
+            "n_permutations": [int(n_permutations)],
+        }
+    )
+    return result[output_columns]
+
+
 def calculate_stage2_nearest_at2_by_core(
     adata,
     min_am_cells=20,
@@ -9267,6 +9525,395 @@ def plot_stage2_primary(
         save=save,
         dpi=dpi,
     )
+
+
+DEFAULT_STAGE2_POOLED_METHODS = (
+    ("kNN exposure", "Continuous MHCII kNN", 15, "k = 15"),
+    ("Fixed-radius exposure", "Continuous MHCII radius", 50, "50 µm"),
+    (
+        "Nearest-AT2 proximity",
+        "Continuous MHCII nearest AT2",
+        1,
+        "nearest AT2",
+    ),
+)
+
+
+def _stage2_numeric_scale(series):
+    """Extract a numeric scale from numeric or human-readable values."""
+    return pd.to_numeric(
+        series.astype(str).str.extract(r"([-+]?\d*\.?\d+)", expand=False),
+        errors="coerce",
+    )
+
+
+def prepare_stage2_primary_pooled(
+    donor_summary,
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    method_col="method",
+    scale_col="scale",
+    effect_col="donor_effect",
+    method_specs=DEFAULT_STAGE2_POOLED_METHODS,
+    donor_aggregation="mean",
+):
+    """Select three spatial analyses and pool tissue estimates per donor.
+
+    Each selected method is reduced to one equal-weight row per biological
+    donor. Tissue-specific donor estimates are combined by the requested mean
+    or median. This pooled estimand is complementary to, rather than a
+    replacement for, tissue-stratified inference.
+
+    Parameters
+    ----------
+    donor_summary
+        Donor-by-tissue output from
+        :func:`summarize_stage2_by_donor_and_tissue`. The defaults select the
+        continuous kNN, radius, and nearest-AT2 methods used by Notebook 06.
+    donor_col, tissue_col
+        Columns identifying independent donors and tissue strata.
+    method_col, scale_col, effect_col
+        Columns containing analysis name, spatial scale, and donor effect.
+    method_specs
+        Ordered ``(display_label, method, target_scale, scale_label)`` tuples.
+        A ``None`` target scale is allowed only when exactly one numeric scale
+        is present for that method.
+    donor_aggregation
+        ``"mean"`` or ``"median"`` for combining tissue estimates within donor.
+
+    Returns
+    -------
+    pandas.DataFrame
+        One row per donor and displayed method, with pooled ``effect``, number
+        of contributing tissues, labels, and display order.
+
+    Raises
+    ------
+    KeyError
+        If a required column is missing.
+    ValueError
+        If specifications are invalid, donor identifiers are missing, input
+        rows are duplicated, or a scale-free specification is ambiguous.
+    """
+    required = [donor_col, tissue_col, method_col, scale_col, effect_col]
+    missing = [column for column in required if column not in donor_summary.columns]
+    if missing:
+        raise KeyError(f"Missing donor_summary columns: {missing}")
+    if donor_aggregation not in {"mean", "median"}:
+        raise ValueError("donor_aggregation must be 'mean' or 'median'.")
+    if not method_specs:
+        raise ValueError("method_specs must contain at least one analysis.")
+
+    data = donor_summary.copy()
+    if data[donor_col].isna().any():
+        raise ValueError(f"{donor_col!r} contains missing donor identifiers.")
+    duplicate_identity = [donor_col, tissue_col, method_col, scale_col]
+    duplicate = data.duplicated(duplicate_identity, keep=False)
+    if duplicate.any():
+        example = data.loc[duplicate, duplicate_identity].iloc[0].to_dict()
+        raise ValueError(
+            "donor_summary contains duplicate donor/tissue method-scale rows; "
+            f"example: {example}"
+        )
+
+    data[effect_col] = pd.to_numeric(data[effect_col], errors="coerce")
+    method_text = data[method_col].astype(str).str.strip().str.lower()
+    numeric_scale = _stage2_numeric_scale(data[scale_col])
+    selected = []
+    labels = []
+
+    for order, specification in enumerate(method_specs):
+        if len(specification) != 4:
+            raise ValueError(
+                "Each method specification must contain four values: display "
+                "label, method, target scale, and scale label."
+            )
+        label, method_name, target_scale, scale_label = specification
+        if label in labels:
+            raise ValueError("Display labels in method_specs must be unique.")
+        labels.append(label)
+        method_mask = method_text.eq(str(method_name).strip().lower())
+        if target_scale is None:
+            available_scales = pd.unique(numeric_scale.loc[method_mask].dropna())
+            if len(available_scales) > 1:
+                raise ValueError(
+                    f"Method {method_name!r} has multiple scales "
+                    f"{sorted(available_scales.tolist())}; specify one explicitly."
+                )
+            mask = method_mask
+        else:
+            if (
+                isinstance(target_scale, bool)
+                or not np.isscalar(target_scale)
+                or not np.isfinite(target_scale)
+            ):
+                raise ValueError("Target scales must be finite numbers or None.")
+            mask = method_mask & np.isclose(
+                numeric_scale, float(target_scale), equal_nan=False
+            )
+
+        part = data.loc[
+            mask, [donor_col, tissue_col, effect_col]
+        ].dropna(subset=[effect_col]).copy()
+        if part.empty:
+            available = (
+                data[[method_col, scale_col]]
+                .drop_duplicates()
+                .sort_values([method_col, scale_col])
+                .to_dict("records")
+            )
+            raise ValueError(
+                f"No rows found for {label!r} ({method_name!r}, "
+                f"scale={target_scale!r}). Available method/scale pairs: {available}"
+            )
+
+        pooled = (
+            part.groupby(donor_col, observed=True, dropna=False)
+            .agg(
+                effect=(effect_col, donor_aggregation),
+                n_tissues=(tissue_col, "nunique"),
+            )
+            .reset_index()
+        )
+        pooled["display_method"] = label
+        pooled["scale_label"] = scale_label
+        pooled["method_order"] = order
+        selected.append(pooled)
+
+    return pd.concat(selected, ignore_index=True)
+
+
+def _bootstrap_mean_ci(values, n_boot, rng):
+    """Return a percentile bootstrap 95% interval for the donor mean."""
+    values = np.asarray(values, dtype=float)
+    if values.size == 1:
+        return float(values[0]), float(values[0])
+    bootstrap = rng.choice(
+        values, size=(int(n_boot), values.size), replace=True
+    ).mean(axis=1)
+    low, high = np.quantile(bootstrap, [0.025, 0.975])
+    return float(low), float(high)
+
+
+def plot_stage2_primary_pooled(
+    donor_summary,
+    tissue_tests=None,
+    donor_col="donor_id",
+    tissue_col="tissue_annotation",
+    method_col="method",
+    scale_col="scale",
+    effect_col="donor_effect",
+    method_specs=DEFAULT_STAGE2_POOLED_METHODS,
+    donor_aggregation="mean",
+    colors=("#E7B2B6", "#AFC9E8", "#A8D5BA"),
+    point_size=32,
+    summary_size=90,
+    n_boot=5000,
+    random_state=301,
+    width_cm=15.5,
+    height_cm=7.2,
+    title="AM MHCII state and AT2 proximity",
+    output_file=None,
+    save=None,
+    dpi=300,
+    show=False,
+):
+    """Plot three donor-level spatial analyses after pooling tissue rows.
+
+    Circles are biological donors, diamonds are means across donors, and
+    horizontal intervals are donor-bootstrap 95% confidence intervals for the
+    mean. Two-sided one-sample Wilcoxon tests use donors as replicates, and
+    Benjamini-Hochberg q values cover the displayed method family.
+    ``tissue_tests`` is accepted for compatibility but intentionally ignored:
+    pooled tests are recalculated from the pooled donor rows.
+
+    Parameters
+    ----------
+    donor_summary
+        Donor-by-tissue result table accepted by
+        :func:`prepare_stage2_primary_pooled`.
+    tissue_tests
+        Compatibility argument; tissue-stratified tests are not reused.
+    donor_col, tissue_col, method_col, scale_col, effect_col
+        Input table column names.
+    method_specs, donor_aggregation
+        Ordered analyses and within-donor tissue aggregation rule.
+    colors
+        One plotting color per method specification.
+    point_size, summary_size
+        Donor-circle and mean-diamond marker areas.
+    n_boot
+        Number of donor bootstrap resamples; must be at least 100.
+    random_state
+        Seed controlling bootstrapping and visual jitter.
+    width_cm, height_cm
+        Figure dimensions in centimetres.
+    title
+        Figure title.
+    output_file, save
+        Alternative optional output paths; provide no more than one.
+    dpi
+        Raster resolution for saved output.
+    show
+        Whether to display the figure interactively.
+
+    Returns
+    -------
+    tuple
+        ``(fig, ax, plot_data, pooled_tests)`` containing the Matplotlib
+        objects, one-row-per-donor plot table, and donor-level test results.
+
+    Notes
+    -----
+    The core-level permutation P values are not used here. Pooling tissues
+    changes the estimand and should be reported alongside tissue-stratified
+    results. Wilcoxon inference concerns the donor-level location, whereas the
+    displayed bootstrap interval summarizes the donor mean.
+    """
+    del tissue_tests
+    if len(colors) != len(method_specs):
+        raise ValueError("Provide one color for each method_specs entry.")
+    if isinstance(n_boot, bool) or not isinstance(n_boot, Integral):
+        raise TypeError("n_boot must be an integer.")
+    if n_boot < 100:
+        raise ValueError("n_boot must be at least 100.")
+    if save is not None and output_file is not None:
+        raise ValueError("Use only one of save or output_file.")
+    output_file = output_file if output_file is not None else save
+
+    plot_data = prepare_stage2_primary_pooled(
+        donor_summary=donor_summary,
+        donor_col=donor_col,
+        tissue_col=tissue_col,
+        method_col=method_col,
+        scale_col=scale_col,
+        effect_col=effect_col,
+        method_specs=method_specs,
+        donor_aggregation=donor_aggregation,
+    )
+    rng = np.random.default_rng(random_state)
+    tests = []
+    for order, (label, _, _, scale_label) in enumerate(method_specs):
+        values = plot_data.loc[
+            plot_data["display_method"].eq(label), "effect"
+        ].to_numpy(float)
+        mean = float(np.mean(values))
+        ci_low, ci_high = _bootstrap_mean_ci(values, n_boot, rng)
+        if len(values) < 3:
+            p_value = np.nan
+        elif np.allclose(values, 0):
+            p_value = 1.0
+        else:
+            p_value = float(
+                wilcoxon(
+                    values, alternative="two-sided", zero_method="wilcox"
+                ).pvalue
+            )
+        tests.append(
+            {
+                "display_method": label,
+                "scale_label": scale_label,
+                "method_order": order,
+                "n_donors": len(values),
+                "mean_effect": mean,
+                "ci_low": ci_low,
+                "ci_high": ci_high,
+                "p_value": p_value,
+            }
+        )
+    pooled_tests = pd.DataFrame(tests)
+    pooled_tests["q_value"] = _bh_adjust(pooled_tests["p_value"])
+
+    cm = 1 / 2.54
+    fig, ax = plt.subplots(figsize=(width_cm * cm, height_cm * cm))
+    y_positions = np.arange(len(method_specs))[::-1]
+    for y, color, (label, _, _, _) in zip(y_positions, colors, method_specs):
+        values = plot_data.loc[
+            plot_data["display_method"].eq(label), "effect"
+        ].to_numpy(float)
+        jitter = rng.uniform(-0.105, 0.105, len(values))
+        ax.scatter(
+            values,
+            y + jitter,
+            s=point_size,
+            color=color,
+            edgecolor="#4A4A4A",
+            linewidth=0.55,
+            alpha=0.78,
+            zorder=2,
+        )
+        result = pooled_tests.loc[
+            pooled_tests["display_method"].eq(label)
+        ].iloc[0]
+        ax.plot(
+            [result["ci_low"], result["ci_high"]],
+            [y, y],
+            color="#333333",
+            linewidth=2.0,
+            solid_capstyle="round",
+            zorder=3,
+        )
+        ax.scatter(
+            result["mean_effect"],
+            y,
+            marker="D",
+            s=summary_size,
+            color=color,
+            edgecolor="#252525",
+            linewidth=0.9,
+            zorder=4,
+        )
+
+    all_x = np.r_[
+        plot_data["effect"].to_numpy(),
+        pooled_tests["ci_low"].to_numpy(),
+        pooled_tests["ci_high"].to_numpy(),
+        0,
+    ]
+    x_span = max(float(np.nanmax(all_x) - np.nanmin(all_x)), 0.15)
+    left = float(np.nanmin(all_x) - 0.10 * x_span)
+    right_data = float(np.nanmax(all_x) + 0.10 * x_span)
+    annotation_x = right_data + 0.04 * x_span
+    ax.set_xlim(left, right_data + 0.42 * x_span)
+    for y, (_, row) in zip(y_positions, pooled_tests.iterrows()):
+        q_value = row["q_value"]
+        q_text = "q = NA" if not np.isfinite(q_value) else f"q = {q_value:.3g}"
+        ax.text(
+            annotation_x,
+            y,
+            f"n = {int(row['n_donors'])}   {q_text}",
+            ha="left",
+            va="center",
+            fontsize=8,
+            color="#444444",
+        )
+
+    labels = [
+        f"{label}\n{scale_label}" for label, _, _, scale_label in method_specs
+    ]
+    ax.set_yticks(y_positions)
+    ax.set_yticklabels(labels, fontsize=9)
+    ax.axvline(
+        0, color="#8A8A8A", linestyle=(0, (2, 2)), linewidth=1.0, zorder=0
+    )
+    ax.set_xlabel("Donor-level spatial effect", fontsize=9)
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=14)
+    ax.grid(False)
+    ax.tick_params(axis="x", labelsize=8, width=0.8, length=3)
+    ax.tick_params(axis="y", length=0)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_visible(False)
+    ax.spines["bottom"].set_linewidth(0.8)
+    fig.tight_layout()
+
+    if output_file is not None:
+        saved_path = Path(output_file)
+        saved_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(saved_path, dpi=dpi, bbox_inches="tight")
+    if show:
+        plt.show()
+    return fig, ax, plot_data, pooled_tests
 
 
 def plot_stage2_scale_sensitivity(
@@ -19691,7 +20338,8 @@ def test_lr_across_donors(donor_summary, min_donors=5):
 
 __all__ = [
     "CANONICAL_UNMEASURED_CHECKS", "CELLTYPE_PALETTE", "CONTEXT_GREY",
-    "DARK_TEXT", "EXPRESSION_CMAP", "FOCUS_PALETTE", "MARKER_MODULES",
+    "DARK_TEXT", "DEFAULT_STAGE2_POOLED_METHODS", "EXPRESSION_CMAP",
+    "FOCUS_PALETTE", "MARKER_MODULES",
     "MACROPHAGE_SUBTYPE_PALETTE", "PROGRAM_CMAP", "REQUIRED_OBS_COLUMNS",
     "SEX_PALETTE", "TISSUE_PALETTE", "TMA_PALETTE",
     "add_human_gene_name", "add_cellchat_groups", "assign_balanced_mhcii_extremes",
@@ -19703,6 +20351,7 @@ __all__ = [
     "calculate_multitype_radius_niche_by_core",
     "calculate_stage2_balanced_extremes_by_core",
     "calculate_stage2_knn_continuum_by_core",
+    "calculate_stage2_nearest_extremes_by_core",
     "calculate_stage2_nearest_mhcii_groups_by_core",
     "calculate_stage2_nearest_mhcii_groups_worker",
     "calculate_stage2_nearest_at2_by_core",
@@ -19725,7 +20374,8 @@ __all__ = [
     "plot_focus_umap", "plot_full_umap",
     "plot_knn_niche_continuum",
     "plot_stage1A_niche_dotmap", "plot_stage1B_primary",
-    "plot_stage2_primary", "plot_stage2_scale_sensitivity",
+    "plot_stage2_primary", "plot_stage2_primary_pooled",
+    "plot_stage2_scale_sensitivity", "prepare_stage2_primary_pooled",
     "plot_stage2_nearest_extremes", "plot_stage2_radius_50_caterpillar",
     "plot_stage3_categorical_pair_heatmap",
     "plot_stage3_categorical_primary",

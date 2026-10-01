@@ -4,10 +4,10 @@
 **Study:** Xu et al., *Cellular hallmarks and aging clock of the human lung parenchyma*, Nature Communications (2026), PMID 42457688
 **Repository root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\XTY_AM_project`
 **Data root:** `D:\Xiaonan\CODEX_projects\Xiaotong_AM\Spatial`
-**Version:** 1.9
-**Status:** The supplied 14-notebook 01–09 workflow, Stage 1/2 continuous and categorical spatial functions with donor-level plots and influence diagnostics, Stage 3 continuous/categorical AM MHCII–AT2 VIM coupling functions, validated Spatial CellChat export, exploratory continuous AM–AT2 ligand–receptor functions, and Scanpy-to-Seurat differential-expression export are version-controlled; notebook structure and source references are locally validated, while full-data execution remains an HPC responsibility
+**Version:** 2.0
+**Status:** The supplied 14-notebook 01–09 workflow, Stage 1/2 continuous, score-extreme, and categorical spatial functions with tissue-stratified and secondary pooled donor plots plus influence diagnostics, Stage 3 continuous/categorical AM MHCII–AT2 VIM coupling functions, validated Spatial CellChat export, exploratory continuous AM–AT2 ligand–receptor functions, and Scanpy-to-Seurat differential-expression export are version-controlled; notebook structure and source references are locally validated, while full-data execution remains an HPC responsibility
 **Created:** 2026-09-12
-**Last updated:** 2026-09-30
+**Last updated:** 2026-10-01
 
 ## Document control
 
@@ -286,6 +286,14 @@ inference averages cores within donor and uses one donor effect per tissue in a
 one-sided Wilcoxon signed-rank test, followed by Benjamini-Hochberg correction
 within method, effect type, scale, and tissue.
 
+A nearest-AT2 score-extremes sensitivity analysis additionally compares equal
+top and bottom continuous MHCII-score tails inside each core. It retains the
+declared tail fraction rather than enlarging tails to meet a cell threshold,
+rejects tied score boundaries, and defines low-tail minus high-tail distance as
+the effect so positive values mean the higher-score AM tail is closer to AT2.
+Its cell-label permutation P value remains diagnostic because spatially nearby
+cells are not independent biological replicates.
+
 The primary Stage 2 figure displays individual donor effects, donor medians and
 interquartile ranges, and tissue-test FDR at prespecified scales: k = 15,
 50-micrometre continuous exposure, and nearest-AT2 proximity. The balanced-tail
@@ -294,6 +302,13 @@ figure shows donor median and IQR across k or radius values without treating
 cells or cores as replicates. Plotting functions reject duplicated donor rows
 and ambiguous duplicate tissue-test rows rather than silently double-weighting
 or selecting the first result.
+
+A separate pooled-tissue companion figure may combine available tissue rows to
+one equal-weight estimate per donor and method, followed by a two-sided donor
+signed-rank test and FDR correction across the three displayed analyses. This
+answers a cross-tissue pooled question and must remain explicitly secondary to
+the prespecified tissue-stratified Stage 2 inference. Duplicate donor/tissue
+rows and ambiguous multi-scale method selections are rejected before pooling.
 
 Stage 2 robustness additionally includes leave-one-core-out and
 leave-one-donor-out influence tables for one prespecified method, target,
@@ -607,3 +622,4 @@ Supplementary panels will show donor-level results, alternative definitions, rad
 | 1.7 | 2026-09-29 | Notebook 01 metadata figure; source API; README; validation | Replaced `plot_metadata_summary` with the supplied Cell-style multi-panel cohort figure, including range-aware summary cards, labelled donor–core tissue tiles, TMA composition, sampling depth, and age–PMI context. Preserved the public signature and returned tables, replaced notebook-only `display()` with a runtime warning plus returned inconsistency table, retained empty-input and zero-denominator safeguards, and added fallback colors for unexpected sex/TMA categories. | Provides the requested publication-style metadata overview without losing auditability or causing non-Jupyter execution failures. |
 | 1.8 | 2026-09-30 | Differential-expression utilities; source API; README; validation | Added `scanpy_de_to_seurat` to convert stored Scanpy `rank_genes_groups` results into a Seurat-like marker table with `pct.1` and `pct.2` detection fractions calculated from the declared `X`, raw, or layer source. Added explicit source, dimensionality, gene-uniqueness, group-size, and optional-Scanpy safeguards; CSV export; public API exposure; and sparse-matrix regression tests. | Makes cross-framework marker review and export reproducible while requiring detection percentages to use the same expression source as the differential-expression test. |
 | 1.9 | 2026-09-30 | Stage 2 categorical nearest-AT2 analysis; pooled Stage 2 figures; source API; README; validation | Added a categorical MHCII-high versus MHCII-low nearest-AT2 core comparison, a cell-ID lookup adapter for metadata-only multicore workers, a paired nearest-distance figure, and a selected-radius caterpillar plot. Preserved the supplied macaron plotting geometry; enforced unique within-core tissue metadata and valid categorical/permutation inputs; and documented that per-core permutations and pooled cross-tissue views are secondary diagnostics while donors remain the inferential unit. | Enables transparent categorical proximity and pooled-radius visualization without treating cells or cores as independent biological replicates or replacing the primary tissue-stratified continuous analysis. |
+| 2.0 | 2026-10-01 | Stage 2 nearest-score extremes; pooled donor summary and figure; source API; README; validation | Added a continuous MHCII-score-tail nearest-AT2 comparison and the supplied three-method pooled donor figure under the collision-safe name `plot_stage2_primary_pooled`, preserving the existing Notebook 06 `plot_stage2_primary`. Corrected the supplied lowercase default identifiers—which belong to Stage 3 VIM coupling in this repository—to the actual Notebook 06 Stage 2 method names. Enforced exact tail fractions, tie-safe boundaries, coordinate-unit declaration, unique core metadata, donor/tissue row uniqueness, unambiguous scale selection, donor-level testing, and method-family FDR. | Adds an auditable secondary view of nearest-AT2 score extremes and cross-tissue pooled effects without overwriting the established tissue-stratified figure, mixing it with Stage 3 VIM endpoints, or treating cells, cores, or repeated tissue rows as biological replicates. |

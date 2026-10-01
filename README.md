@@ -99,6 +99,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 | `calculate_radius_niche_continuum` | Reusable library function; not called directly by the current notebooks |
 | `calculate_stage2_balanced_extremes_by_core` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
 | `calculate_stage2_knn_continuum_by_core` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `calculate_stage2_nearest_extremes_by_core` | Reusable library function for Notebook 06 sensitivity analysis; not called directly by the current notebooks |
 | `calculate_stage2_nearest_mhcii_groups_by_core` | Reusable library function; not called directly by the current notebooks |
 | `calculate_stage2_nearest_mhcii_groups_worker` | Reusable library function; not called directly by the current notebooks |
 | `calculate_stage2_nearest_at2_by_core` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
@@ -140,6 +141,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 | `plot_stage1A_niche_dotmap` | `05_1A_Unbiased_Niche_Discovery.ipynb` |
 | `plot_stage1B_primary` | `05_1B_Focused_AMAT2_Validation.ipynb` |
 | `plot_stage2_primary` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
+| `plot_stage2_primary_pooled` | Reusable pooled-tissue companion for Notebook 06; not called directly by the current notebooks |
 | `plot_stage2_nearest_extremes` | Reusable library function; not called directly by the current notebooks |
 | `plot_stage2_radius_50_caterpillar` | Reusable library function; not called directly by the current notebooks |
 | `plot_stage2_scale_sensitivity` | `06_AM_MHCII_AT2_Spatial_Association.ipynb` |
@@ -148,6 +150,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 | `plot_stage3_categorical_scale_sensitivity` | `07_1_AM_MHCII_AT2_VIM_Categorical_Spatial_Association.ipynb` |
 | `plot_stage3_primary` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
 | `plot_stage3_scale_sensitivity` | `07_AM_MHCII_AT2_VIM_Continuous_Spatial_Association.ipynb` |
+| `prepare_stage2_primary_pooled` | Reusable pooled-tissue companion for Notebook 06; not called directly by the current notebooks |
 | `radius_weighted_mean` | Reusable library function; not called directly by the current notebooks |
 | `rank_stage2_core_contributions` | `08_Spatial_Umap.ipynb` |
 | `run_spatial_function_multicore` | `05_1A_Unbiased_Niche_Discovery.ipynb`<br>`05_1B_Focused_AMAT2_Validation.ipynb` |
@@ -224,6 +227,7 @@ categorized descriptions below and in each function's NumPy-style docstring.
 | `calculate_stage2_nearest_at2_by_core` | Correlates the continuous AM MHCII score with nearest-AT2 distance and reverses the sign so positive effects consistently mean that higher-score AMs are closer to AT2. |
 | `calculate_stage2_nearest_mhcii_groups_by_core` | Compares median or mean nearest-AT2 distance between categorical MHCII-high and MHCII-low AMs within one core. The low-minus-high effect is positive when MHCII-high AMs are closer; per-core permutation P values are diagnostic. |
 | `calculate_stage2_nearest_mhcii_groups_worker` | Restores categorical MHCII labels by unique string cell ID inside the lightweight multicore worker before running the categorical nearest-AT2 comparison. |
+| `calculate_stage2_nearest_extremes_by_core` | Compares median or mean nearest-AT2 distance between equal-sized continuous MHCII-score tails. It preserves the requested tail fraction, omits cores whose score ties cross either boundary, and reports positive effects when the high-score tail is closer. Coordinate scaling is explicit, and the within-core permutation P value is diagnostic. |
 | `run_stage2_multicore` | Compatibility wrapper around `run_spatial_function_multicore` for the Stage 2 functions. Core-level permutation P values and `FDR_core` are diagnostic rather than final biological-replicate inference. |
 | `summarize_stage2_by_donor_and_tissue` | Averages Stage 2 effects across cores within donor/tissue, then performs one-sided donor-level Wilcoxon tests and Benjamini–Hochberg correction within declared method/scale/tissue families. |
 | `rank_stage2_core_contributions` | Performs leave-one-core-out and leave-one-donor-out sensitivity analysis for one prespecified tissue/radius/hypothesis. It defaults to the primary Stage 2 estimator (equal-core arithmetic averaging within donor and a one-sided greater Wilcoxon test), with Fisher-z aggregation and two-sided testing available as explicit sensitivities. AM cell counts are descriptive, and rows flag when omitting a core also removes a single-core donor. |
@@ -316,6 +320,8 @@ partly circular and require sensitivity analysis excluding overlapping genes.
 | `plot_stage1A_niche_dotmap` | Creates one donor-level niche-discovery dot map per focal cell type. Color is median donor effect, size is donor-level FDR evidence, and outlines mark the selected FDR threshold. |
 | `plot_stage1B_primary` | Filters full multitype summaries to the unordered AM–AT2 pair, then shows individual donor effects, medians, interquartile ranges, and donor-level tissue-test annotations for selected Stage 1 methods and scales. Both directional orientations are retained. |
 | `plot_stage2_primary` | Shows donor-level effects, median diamonds, donor IQRs, and donor-level tissue-test annotations for prespecified continuous kNN, radius, and nearest-AT2 analyses plus a clearly marked secondary balanced-tail panel. Duplicate donor or tissue-test rows are rejected before plotting. |
+| `prepare_stage2_primary_pooled` | Selects prespecified kNN, radius, and nearest-AT2 results and combines tissue-specific estimates into one equal-weight row per donor. Duplicate donor/tissue method-scale rows and ambiguous multi-scale selections are rejected. |
+| `plot_stage2_primary_pooled` | Preserves the supplied three-row macaron display for pooled donor estimates. Circles are donors, diamonds and bootstrap intervals summarize donor means, and two-sided signed-rank q values are recalculated from pooled donor rows. This is a secondary pooled estimand, not a replacement for tissue-stratified inference. |
 | `plot_stage2_nearest_extremes` | Shows paired core-level MHCII-low/high nearest-AT2 distances while calculating pooled estimates, bootstrap intervals, and the paired signed-rank test from donor summaries. Core points are descriptive; donors are the inferential replicates. |
 | `plot_stage2_radius_50_caterpillar` | Displays core correlations at a selected radius by tissue color, Fisher-z averages cores within donor, and reports a donor-pooled estimate, donor bootstrap interval, and unadjusted two-sided signed-rank test. This pooled figure is secondary to tissue-stratified analysis. |
 | `plot_stage2_scale_sensitivity` | Displays the median and IQR of donor effects across k or radius values by tissue. This is a descriptive sensitivity plot based on unique donor rows, not a cell- or core-level inferential analysis. |
